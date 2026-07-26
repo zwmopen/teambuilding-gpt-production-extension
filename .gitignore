@@ -1,0 +1,23 @@
+# 可重建构建产物
+/build/
+/dist/
+/out/
+
+# 依赖和缓存
+node_modules/
+*.cache
+*.tmp
+*.log
+
+# 密钥与本地配置
+.env
+.env.*
+!.env.example
+
+# 最终安装包默认不进 Git，但保留发布说明和清单
+/releases/*
+!/releases/README.md
+!/releases/manifest.json
+
+.DS_Store
+Thumbs.db

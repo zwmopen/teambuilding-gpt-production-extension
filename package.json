@@ -1,0 +1,10 @@
+{
+  "name": "teambuilding-gpt-production-extension",
+  "version": "0.1.8",
+  "private": true,
+  "description": "寄生于真实 ChatGPT 页面的团建数字作品生产扩展",
+  "scripts": {
+    "test": "node --test src/extension-architecture.test.js",
+    "check": "node --check src/sidebar.js && node --check src/gm-shim.js && node --check src/background.js"
+  }
+}
