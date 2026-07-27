@@ -15,7 +15,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.1.8");
+  assert.equal(manifest.version, "0.1.9");
 });
 
 test("右侧生产舱同时声明成品、素材、路径设置和附件上传入口", () => {
@@ -53,7 +53,8 @@ test("右侧生产舱同时声明成品、素材、路径设置和附件上传�
   assert.match(background, /\/api\/extension\/download-event/);
   assert.match(shim, /downloadCallbacks/);
   assert.match(shim, /tb-download-status/);
-  assert.match(source, /input\[type="file"\]/);
+  assert.match(source, /#upload-files/);
+  assert.doesNotMatch(source, /querySelectorAll\(['"]input\[type="file"\]/);
   assert.match(source, /DataTransfer/);
   assert.match(source, /成品区/);
   assert.match(source, /素材区/);
@@ -68,6 +69,31 @@ test("右侧生产舱同时声明成品、素材、路径设置和附件上传�
   assert.match(source, /document\.addEventListener\("paste"/);
   assert.match(source, /正在自动连接本地工作台/);
   assert.match(source, /scheduleRefresh\(5_000\)/);
+});
+
+test("扩展不接管 ChatGPT 原生左侧会话，也不覆盖输入框已有文案", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  assert.match(vendor, /const ENABLE_CONVERSATION_TREE = false/);
+  assert.match(vendor, /if \(!ENABLE_CONVERSATION_TREE\) return/);
+  assert.match(source, /function mergeComposerText/);
+  assert.match(source, /existingText/);
+  assert.doesNotMatch(source, /target\.innerHTML = ""/);
+  assert.match(source, /isChatDropTarget/);
+  assert.match(source, /closest\?\.\("main"\)/);
+  assert.doesNotMatch(source, /state\.dragging && !event\.target\.closest\?\.\(`#\$\{ROOT_ID\}`\)/);
+});
+
+test("右侧文件树支持经确认的真实文件夹移动", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const css = fs.readFileSync(path.join(root, "sidebar.css"), "utf8");
+  assert.match(source, /\/api\/extension\/move-entry/);
+  assert.match(source, /pendingMove/);
+  assert.match(source, /data-confirm-move/);
+  assert.match(source, /data-cancel-move/);
+  assert.match(source, /dropEffect = "move"/);
+  assert.match(css, /\.is-move-target/);
+  assert.match(css, /\.tb-move-confirm/);
 });
 
 test("扩展内的打包按钮直连工作台，不再默认唤起 VBS 协议", () => {

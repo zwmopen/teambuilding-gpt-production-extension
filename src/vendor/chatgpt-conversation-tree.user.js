@@ -70,6 +70,9 @@
   const WORK_PACKAGE_VISIBLE_KEY = 'work-package-visible';
   const HARD_NAVIGATION_FALLBACK_KEY = 'hard-navigation-fallback-enabled';
   const DRAG_MIME = `application/x-${APP_ID}`;
+  // ChatGPT 会频繁替换左侧历史列表。搬动其原生 React 节点会导致会话点击卡住，
+  // 因此扩展版只保留下载、提示词和工作包能力，原生左侧会话由 ChatGPT 自己管理。
+  const ENABLE_CONVERSATION_TREE = false;
 
   const icons = {
     chevron: (open) => open
@@ -2443,6 +2446,41 @@
     panel.hidden = true;
     panel.setAttribute('role', 'dialog');
     panel.setAttribute('aria-label', '提示词库');
+    panel.addEventListener('click', (event) => {
+      const promptAction = event.target.closest?.('[data-cgpt-prompt-action]');
+      if (!promptAction) return;
+      event.preventDefault();
+      event.stopPropagation();
+      const action = promptAction.dataset.cgptPromptAction;
+      const promptId = promptAction.dataset.promptId || '';
+      if (action === 'new') {
+        editingPromptId = 'new';
+        renderPromptPanel();
+      } else if (action === 'edit') {
+        editingPromptId = promptId;
+        renderPromptPanel();
+      } else if (action === 'delete') {
+        deletePrompt(promptId);
+      } else if (action === 'insert') {
+        insertPrompt(promptId);
+      } else if (action === 'sync-cloud') {
+        void syncCloudPrompts(true);
+      } else if (action === 'toggle-help') {
+        promptHelpVisible = !promptHelpVisible;
+        renderPromptPanel();
+      } else if (action === 'restore-cloud') {
+        restorePreviousCloudPrompts();
+      } else if (action === 'export-cloud') {
+        exportCloudPromptFile();
+      } else if (action === 'save') {
+        upsertPromptFromPanel();
+      } else if (action === 'cancel') {
+        editingPromptId = '';
+        renderPromptPanel();
+      } else if (action === 'close') {
+        closePromptPanel();
+      }
+    }, true);
     document.body.append(panel);
     return panel;
   }
@@ -3185,6 +3223,7 @@
   }
 
   function scanNativeChats() {
+    if (!ENABLE_CONVERSATION_TREE) return;
     if (!ensureMounted() || rendering) return;
 
     let changed = false;
@@ -3275,6 +3314,7 @@
   }
 
   function scheduleScan() {
+    if (!ENABLE_CONVERSATION_TREE) return;
     if (document.hidden) return;
     clearTimeout(scanTimer);
     scanTimer = window.setTimeout(() => runWhenIdle(scanNativeChats, 900), 240);

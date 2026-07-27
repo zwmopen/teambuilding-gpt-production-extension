@@ -27,6 +27,8 @@
     connected: false,
     collapsed: false,
     dragging: null,
+    moveTarget: null,
+    pendingMove: null,
     pendingUsage: null,
     usageCommitTimer: null
   };
@@ -171,6 +173,55 @@
     if (overlay) overlay.hidden = !visible;
   }
 
+  function isChatDropTarget(target) {
+    return Boolean(
+      target?.closest?.("main")
+      && !target.closest?.(`#${ROOT_ID}`)
+      && !target.closest?.("nav, aside, [role='navigation']")
+    );
+  }
+
+  function clearMoveTarget() {
+    document.querySelectorAll(`#${ROOT_ID} .is-move-target`)
+      .forEach((node) => node.classList.remove("is-move-target"));
+    state.moveTarget = null;
+  }
+
+  function renderMoveDialog() {
+    const dialog = document.querySelector(`#${ROOT_ID} [data-move-dialog]`);
+    if (!dialog) return;
+    const pending = state.pendingMove;
+    dialog.hidden = !pending;
+    if (!pending) return;
+    dialog.querySelector("[data-move-source-name]").textContent = pending.entry.name;
+    dialog.querySelector("[data-move-target-name]").textContent = fileName(pending.targetPath);
+  }
+
+  async function confirmMove() {
+    const pending = state.pendingMove;
+    if (!pending) return;
+    state.pendingMove = null;
+    renderMoveDialog();
+    setStatus(`正在移动“${pending.entry.name}”…`);
+    try {
+      await api("/api/extension/move-entry", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          sourcePath: pending.entry.path,
+          targetPath: pending.targetPath
+        })
+      });
+      state.productChildren = {};
+      state.openProducts.clear();
+      state.openMaterials.clear();
+      await refresh();
+      setStatus(`已移动到“${fileName(pending.targetPath)}”`, "success");
+    } catch (error) {
+      setStatus(`移动失败：${error.message}`, "danger");
+    }
+  }
+
   function productRows(entries = state.productTree?.entries || [], depth = 0) {
     return entries.map((item) => {
       if (item.kind === "file") {
@@ -187,9 +238,10 @@
       const children = state.productChildren[item.path]?.entries || [];
       const directCount = Number(item.imageCount || 0) + Number(item.textCount || 0);
       return `
-        <details class="tb-tree-group tb-product-group" style="--tree-depth:${depth}" data-product-path="${escapeHtml(item.path)}"
-          ${state.openProducts.has(item.path) ? "open" : ""}>
-          <summary>
+          <details class="tb-tree-group tb-product-group" style="--tree-depth:${depth}" data-product-path="${escapeHtml(item.path)}"
+            ${state.openProducts.has(item.path) ? "open" : ""}>
+          <summary draggable="true" data-move-source-kind="product" data-move-source-id="${escapeHtml(item.id)}"
+            data-move-target-path="${escapeHtml(item.path)}">
             <span class="tb-folder-icon"></span>
             <span class="tb-library-copy">
               <b title="${escapeHtml(item.path)}">${escapeHtml(item.name)}</b>
@@ -199,7 +251,8 @@
           </summary>
           <div class="tb-tree-items">
             ${directCount ? `
-              <article class="tb-work-row tb-folder-upload" draggable="true" data-entry-kind="product" data-entry-id="${escapeHtml(item.id)}">
+              <article class="tb-work-row tb-folder-upload" draggable="true" data-entry-kind="product" data-entry-id="${escapeHtml(item.id)}"
+                data-move-source-kind="product" data-move-source-id="${escapeHtml(item.id)}">
                 <span class="tb-image-count"><b>${Number(item.imageCount || 0)}</b><small>图</small></span>
                 <span class="tb-work-copy"><span class="tb-work-name">上传这个文件夹</span><small>${Number(item.textCount || 0)} 个文档</small></span>
                 <button type="button" data-upload-product="${escapeHtml(item.id)}">传 GPT</button>
@@ -218,11 +271,12 @@
     return categories.map((category) => `
       <details class="tb-tree-group" data-category="${escapeHtml(category.id)}"
         ${state.openMaterials.has(category.id) ? "open" : ""}>
-        <summary><span class="tb-folder-icon"></span><b title="${escapeHtml(category.name)}">${escapeHtml(category.name)}</b><small>${Number(category.count || 0)}</small></summary>
+        <summary data-move-target-path="${escapeHtml(category.path)}"><span class="tb-folder-icon"></span><b title="${escapeHtml(category.name)}">${escapeHtml(category.name)}</b><small>${Number(category.count || 0)}</small></summary>
         <div class="tb-tree-items">
           ${category.loaded ? (category.items || []).map((item) => `
             <article class="tb-work-row ${item.usage?.status === "used" ? "is-used" : ""}" draggable="${item.usage?.status === "used" ? "false" : "true"}"
-              data-entry-kind="material" data-entry-id="${escapeHtml(item.id)}">
+              data-entry-kind="material" data-entry-id="${escapeHtml(item.id)}"
+              data-move-source-kind="material" data-move-source-id="${escapeHtml(item.id)}">
               <span class="tb-post-folder" aria-hidden="true"><i class="tb-folder-icon"></i></span>
               <span class="tb-work-copy">
                 <span class="tb-work-name" title="${escapeHtml(item.path || item.name)}">${escapeHtml(item.name)}</span>
@@ -282,6 +336,16 @@
           <div class="tb-zone-scroll" data-materials></div>
         </section>
         <section class="tb-upload-queue" data-upload-queue hidden></section>
+        <section class="tb-move-confirm" data-move-dialog hidden role="dialog" aria-modal="true" aria-label="确认移动文件夹">
+          <div>
+            <b>移动本地文件夹？</b>
+            <p>“<span data-move-source-name></span>”将真实移动到“<span data-move-target-name></span>”。原位置会消失。</p>
+            <footer>
+              <button type="button" data-cancel-move>取消</button>
+              <button type="button" data-confirm-move>确认移动</button>
+            </footer>
+          </div>
+        </section>
         <footer class="tb-studio-footer"><span data-status>正在连接本地工作台…</span><span class="tb-health" data-health></span><b>拖入对话或点“传 GPT”</b></footer>
       `;
       host.appendChild(root);
@@ -317,8 +381,15 @@
   function composer() {
     return document.querySelector("#prompt-textarea")
       || document.querySelector('textarea[placeholder*="Message"]')
-      || document.querySelector('[data-lexical-editor="true"][contenteditable="true"]')
-      || document.querySelector('main [contenteditable="true"]');
+      || document.querySelector('form [data-lexical-editor="true"][contenteditable="true"]')
+      || document.querySelector('[data-testid*="composer"] [contenteditable="true"]');
+  }
+
+  function mergeComposerText(existing, addition) {
+    const current = String(existing || "");
+    if (!current.trim()) return addition;
+    if (current.includes(addition)) return current;
+    return `${current.replace(/\s+$/, "")}\n\n${addition}`;
   }
 
   function fillComposer(text) {
@@ -326,18 +397,29 @@
     if (!target) throw new Error("没有找到当前 GPT 输入框");
     target.focus();
     if (target instanceof HTMLTextAreaElement || target instanceof HTMLInputElement) {
+      const existingText = target.value || "";
+      const nextText = mergeComposerText(existingText, text);
       const setter = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(target), "value")?.set;
-      setter?.call(target, text);
+      if (setter) setter.call(target, nextText);
+      else target.value = nextText;
       target.dispatchEvent(new Event("input", { bubbles: true }));
       return;
     }
-    target.innerHTML = "";
+    const existingText = target.innerText || target.textContent || "";
+    const nextText = mergeComposerText(existingText, text);
+    const addition = existingText.trim() ? `\n\n${text}` : text;
+    const selection = window.getSelection();
+    const range = document.createRange();
+    range.selectNodeContents(target);
+    range.collapse(false);
+    selection?.removeAllRanges();
+    selection?.addRange(range);
     if (typeof document.execCommand === "function") {
-      document.execCommand("insertText", false, text);
+      document.execCommand("insertText", false, addition);
     } else {
-      target.textContent = text;
+      target.textContent = nextText;
     }
-    target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: text }));
+    target.dispatchEvent(new InputEvent("input", { bubbles: true, inputType: "insertText", data: addition }));
   }
 
   function waitFor(check, timeout = 4000) {
@@ -353,17 +435,17 @@
   }
 
   async function findFileInput() {
-    const preferred = document.querySelector('#upload-files:not(:disabled)')
+    return document.querySelector('#upload-files:not(:disabled)')
       || document.querySelector('input[data-testid="upload-files-input"]:not(:disabled)');
-    if (preferred) return preferred;
-    const existing = [...document.querySelectorAll('input[type="file"]')]
-      .find((input) => !input.disabled && !/conversation-tree/i.test(input.id || ""));
-    if (existing) return existing;
-    const button = [...document.querySelectorAll("button")].find((node) =>
-      /上传|添加文件|attach|upload|add files/i.test(`${node.ariaLabel || ""} ${node.title || ""} ${node.textContent || ""}`)
-    );
-    button?.click();
-    return waitFor(() => [...document.querySelectorAll('input[type="file"]')].find((input) => !input.disabled));
+  }
+
+  function attachmentPreviewCount() {
+    const scope = document.querySelector("main");
+    if (!scope) return 0;
+    return new Set([
+      ...scope.querySelectorAll('[data-testid*="attachment"]'),
+      ...scope.querySelectorAll('button[aria-label*="Remove attachment"], button[aria-label*="移除附件"]')
+    ]).size;
   }
 
   async function loadFiles(paths, task) {
@@ -444,9 +526,8 @@
   }
 
   function composerContainsEntry(entry) {
-    const composer = document.querySelector('textarea[placeholder], [contenteditable="true"][data-lexical-editor="true"]')
-      || document.querySelector('[contenteditable="true"]');
-    const value = composer?.value || composer?.innerText || composer?.textContent || "";
+    const target = composer();
+    const value = target?.value || target?.innerText || target?.textContent || "";
     return Boolean(entry && value && (value.includes(entry.path) || value.includes(entry.name)));
   }
 
@@ -522,20 +603,23 @@
       }
       const [files, input] = await Promise.all([loadFiles(paths, task), findFileInput()]);
       if (task.controller.signal.aborted) throw new DOMException("上传已取消", "AbortError");
-      if (!input) throw new Error("当前 GPT 页面暂时没有找到上传入口");
+      if (!input) throw new Error("当前 GPT 没有原生附件入口，请先点输入框旁的“+”再重试");
       task.status = "attaching";
       renderQueue();
+      const previewsBefore = attachmentPreviewCount();
       const transfer = new DataTransfer();
       files.forEach((file) => transfer.items.add(file));
       input.files = transfer.files;
       input.dispatchEvent(new Event("input", { bubbles: true }));
       input.dispatchEvent(new Event("change", { bubbles: true }));
       if (input.files.length !== files.length) throw new Error("文件没有成功进入 ChatGPT 附件入口");
-      fillComposer(instruction(entry));
       const appeared = await waitFor(() => {
         const first = files[0]?.name;
-        return first && document.body?.innerText?.includes(first);
-      }, 6000);
+        const mainText = document.querySelector("main")?.innerText || "";
+        return (first && mainText.includes(first)) || attachmentPreviewCount() > previewsBefore;
+      }, 8000);
+      if (!appeared) throw new Error("ChatGPT 没有显示原生附件预览，本次未登记为上传成功");
+      fillComposer(instruction(entry));
       task.status = "success";
       task.completed = task.total;
       if (entry.entryKind === "material") {
@@ -544,9 +628,7 @@
       }
       renderQueue();
       setStatus(
-        appeared
-          ? `已上传 ${files.length} 个文件，并填入生产指令`
-          : `已交给 ChatGPT ${files.length} 个文件，正在生成附件预览`,
+        `已上传 ${files.length} 个文件，并保留原文案后追加生产指令`,
         "success"
       );
     } catch (error) {
@@ -743,6 +825,16 @@
       }
       return;
     }
+    if (event.target.closest(`#${ROOT_ID} [data-cancel-move]`)) {
+      state.pendingMove = null;
+      renderMoveDialog();
+      setStatus("已取消移动");
+      return;
+    }
+    if (event.target.closest(`#${ROOT_ID} [data-confirm-move]`)) {
+      confirmMove();
+      return;
+    }
     const productUpload = event.target.closest(`#${ROOT_ID} [data-upload-product]`);
     if (productUpload) uploadEntry({ ...findEntry("product", productUpload.dataset.uploadProduct), entryKind: "product" });
     const materialUpload = event.target.closest(`#${ROOT_ID} [data-upload-material]`);
@@ -775,31 +867,70 @@
   }, true);
 
   document.addEventListener("dragstart", (event) => {
-    const row = event.target.closest?.(`#${ROOT_ID} [data-entry-kind]`);
+    const row = event.target.closest?.(`#${ROOT_ID} [data-move-source-kind], #${ROOT_ID} [data-entry-kind]`);
     if (!row) return;
-    state.dragging = { ...findEntry(row.dataset.entryKind, row.dataset.entryId), entryKind: row.dataset.entryKind };
-    showDropOverlay(Boolean(state.dragging));
-    event.dataTransfer.effectAllowed = "copy";
+    const kind = row.dataset.moveSourceKind || row.dataset.entryKind;
+    const id = row.dataset.moveSourceId || row.dataset.entryId;
+    state.dragging = { ...findEntry(kind, id), entryKind: kind };
+    if (!state.dragging?.path) {
+      state.dragging = null;
+      return;
+    }
+    showDropOverlay(false);
+    event.dataTransfer.effectAllowed = "copyMove";
     event.dataTransfer.setData("text/plain", state.dragging?.name || "团建内容");
   });
   document.addEventListener("dragover", (event) => {
-    if (state.dragging && !event.target.closest?.(`#${ROOT_ID}`)) {
+    if (!state.dragging) return;
+    const moveTarget = event.target.closest?.(`#${ROOT_ID} [data-move-target-path]`);
+    if (moveTarget && moveTarget.dataset.moveTargetPath !== state.dragging.path) {
+      event.preventDefault();
+      event.stopPropagation();
+      clearMoveTarget();
+      moveTarget.classList.add("is-move-target");
+      state.moveTarget = moveTarget.dataset.moveTargetPath;
+      event.dataTransfer.dropEffect = "move";
+      showDropOverlay(false);
+      return;
+    }
+    clearMoveTarget();
+    if (isChatDropTarget(event.target)) {
       event.preventDefault();
       event.stopPropagation();
       event.dataTransfer.dropEffect = "copy";
+      showDropOverlay(true);
+    } else {
+      showDropOverlay(false);
     }
   }, true);
   document.addEventListener("drop", (event) => {
-    if (!state.dragging || event.target.closest?.(`#${ROOT_ID}`)) return;
+    if (!state.dragging) return;
+    const moveTarget = event.target.closest?.(`#${ROOT_ID} [data-move-target-path]`);
+    if (moveTarget && moveTarget.dataset.moveTargetPath !== state.dragging.path) {
+      event.preventDefault();
+      event.stopPropagation();
+      state.pendingMove = {
+        entry: state.dragging,
+        targetPath: moveTarget.dataset.moveTargetPath
+      };
+      state.dragging = null;
+      clearMoveTarget();
+      showDropOverlay(false);
+      renderMoveDialog();
+      return;
+    }
+    if (!isChatDropTarget(event.target)) return;
     event.preventDefault();
     event.stopPropagation();
     const entry = state.dragging;
     state.dragging = null;
+    clearMoveTarget();
     showDropOverlay(false);
     uploadEntry(entry);
   }, true);
   document.addEventListener("dragend", () => {
     state.dragging = null;
+    clearMoveTarget();
     showDropOverlay(false);
   });
 
