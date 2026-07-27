@@ -1,8 +1,16 @@
 {
   "project": "teambuilding-gpt-production-extension",
-  "version": "0.1.9",
-  "source_commit": "a7e0fd3e2cb4b712fbd8d15aa91177541a591c00",
+  "version": "0.2.0",
+  "source_commit": "d2479c8",
   "artifacts": [
+    {
+      "file": "0.2.0/团建GPT数字作品生产助手-0.2.0.zip",
+      "sha256": "81DA75BFCB9B612D25D9B263296DBB85BA2B9072A1E70CA9F69A4CCECAA4756D",
+      "size": 83315,
+      "platform": "Microsoft Edge / Chrome（Manifest V3）",
+      "built_at": "2026-07-27",
+      "known_limits": "需要本机团建内容工作台 0.9.0；浏览器安全边界要求用户在扩展管理页手动重新加载；真实 ChatGPT 页面交互需在重新加载后验收。"
+    },
     {
       "file": "0.1.9/团建GPT数字作品生产助手-0.1.9.zip",
       "sha256": "4D9A8B1E9B24C783A8F058707B7AAA44F7299D302296B9EB133B4441C10D8139",
