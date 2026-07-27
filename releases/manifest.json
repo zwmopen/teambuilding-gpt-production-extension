@@ -1,8 +1,16 @@
 {
   "project": "teambuilding-gpt-production-extension",
-  "version": "0.2.1",
-  "source_commit": "6e72460",
+  "version": "0.2.2",
+  "source_commit": "984018b",
   "artifacts": [
+    {
+      "file": "0.2.2/团建GPT数字作品生产助手-0.2.2.zip",
+      "sha256": "9D30A268CFF69604F6A02A423D42F86CC9016C1F4C45DDF23527EF1721D6E759",
+      "size": 86299,
+      "platform": "Microsoft Edge / Chrome（Manifest V3）",
+      "built_at": "2026-07-28",
+      "known_limits": "地区不作为独立筛选维度；浏览器安全边界要求用户在扩展管理页手动重新加载一次。"
+    },
     {
       "file": "0.2.1/团建GPT数字作品生产助手-0.2.1.zip",
       "sha256": "A082F34A560F2FAE506F6C0943050F1B1124D3497BE2AA5C4ED13AD1F671B500",
