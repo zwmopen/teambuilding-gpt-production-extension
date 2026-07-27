@@ -84,6 +84,19 @@ test("扩展不接管 ChatGPT 原生左侧会话，也不覆盖输入框已有�
   assert.doesNotMatch(source, /state\.dragging && !event\.target\.closest\?\.\(`#\$\{ROOT_ID\}`\)/);
 });
 
+test("提示词入口与面板事件不依赖已停用的左侧会话树", () => {
+  const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  const panelStart = vendor.indexOf("function ensurePromptPanel");
+  const panelEnd = vendor.indexOf("function promptComposerInput", panelStart);
+  const buttonStart = vendor.indexOf("function ensurePromptButton");
+  const buttonEnd = vendor.indexOf("function schedulePromptButton", buttonStart);
+  assert.ok(panelStart > -1 && panelEnd > panelStart);
+  assert.ok(buttonStart > -1 && buttonEnd > buttonStart);
+  assert.match(vendor.slice(panelStart, panelEnd), /panel\.addEventListener\('click'/);
+  assert.match(vendor.slice(buttonStart, buttonEnd), /button\.addEventListener\('click'/);
+  assert.match(vendor, /ensurePromptButton\(\);/);
+});
+
 test("右侧文件树支持经确认的真实文件夹移动", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const css = fs.readFileSync(path.join(root, "sidebar.css"), "utf8");
