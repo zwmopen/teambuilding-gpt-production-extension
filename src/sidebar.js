@@ -4,6 +4,14 @@
   const LAUNCHER_ID = "tb-gpt-production-launcher";
   const DROP_OVERLAY_ID = "tb-gpt-production-drop-overlay";
   const PATH_STORAGE_KEY = "tb-production-paths";
+  const ACTION_STORAGE_KEY = "tb-material-action-settings";
+  const DEFAULT_ACTION_SETTINGS = Object.freeze({
+    game: { enabled: true, label: "游戏" },
+    conversion: { enabled: true, label: "转化" },
+    guide: { enabled: true, label: "合集" },
+    increment: { enabled: true, label: "+1" },
+    move: { enabled: false, label: "收纳", targetPath: "" }
+  });
   const DEFAULT_PATHS = Object.freeze({
     productRoot: "D:\\AICode\\项目推进\\projects\\江湖有旅人\\主项目\\成品库（GPT+本地脚本制作）",
     materialRoot: "D:\\AICode\\项目推进\\projects\\江湖有旅人\\主项目\\01-素材库"
@@ -16,6 +24,9 @@
     productChildren: {},
     openProducts: new Set(),
     openMaterials: new Set(),
+    materialFilter: { mainTag: "全部", usage: "all", query: "" },
+    actionSettings: JSON.parse(JSON.stringify(DEFAULT_ACTION_SETTINGS)),
+    settingsOpen: false,
     busy: false,
     uploadTasks: [],
     uploadSequence: 0,
@@ -86,6 +97,31 @@
     };
     state.paths = next;
     chrome.storage.local.set({ [PATH_STORAGE_KEY]: next });
+  }
+
+  function normalizeActionSettings(raw = {}) {
+    return Object.fromEntries(Object.entries(DEFAULT_ACTION_SETTINGS).map(([key, defaults]) => {
+      const saved = raw?.[key] || {};
+      return [key, {
+        ...defaults,
+        enabled: saved.enabled !== undefined ? Boolean(saved.enabled) : defaults.enabled,
+        label: String(saved.label || defaults.label).trim().slice(0, 8) || defaults.label,
+        ...(key === "move" ? { targetPath: String(saved.targetPath || "").trim() } : {})
+      }];
+    }));
+  }
+
+  function readActionSettings() {
+    return new Promise((resolve) => {
+      chrome.storage.local.get(ACTION_STORAGE_KEY, (result) => {
+        resolve(normalizeActionSettings(result?.[ACTION_STORAGE_KEY] || {}));
+      });
+    });
+  }
+
+  function storeActionSettings(settings = state.actionSettings) {
+    state.actionSettings = normalizeActionSettings(settings);
+    chrome.storage.local.set({ [ACTION_STORAGE_KEY]: state.actionSettings });
   }
 
   function setStatus(message, tone = "") {
@@ -266,6 +302,33 @@
     }).join("") || `<div class="tb-empty">成品目录是空的</div>`;
   }
 
+  function materialMatchesFilter(item) {
+    const { mainTag, usage, query } = state.materialFilter;
+    if (mainTag !== "全部" && item.mainTag !== mainTag) return false;
+    const count = Number(item.usageCount || 0);
+    if (usage === "0" && count !== 0) return false;
+    if (usage === "1" && count !== 1) return false;
+    if (usage === "2" && count !== 2) return false;
+    if (usage === "3+" && count < 3) return false;
+    const needle = String(query || "").trim().toLowerCase();
+    if (needle) {
+      const haystack = `${item.name || ""} ${item.mainTag || ""} ${(item.tags || []).join(" ")} ${item.folderHash || ""}`.toLowerCase();
+      if (!haystack.includes(needle)) return false;
+    }
+    return true;
+  }
+
+  function materialActionButtons(item) {
+    const settings = state.actionSettings;
+    const buttons = [];
+    if (settings.game.enabled) buttons.push(`<button type="button" data-material-main-tag="团建游戏" data-material-id="${escapeHtml(item.id)}">${escapeHtml(settings.game.label)}</button>`);
+    if (settings.conversion.enabled) buttons.push(`<button type="button" data-material-main-tag="团建转化" data-material-id="${escapeHtml(item.id)}">${escapeHtml(settings.conversion.label)}</button>`);
+    if (settings.guide.enabled) buttons.push(`<button type="button" data-material-main-tag="合集攻略" data-material-id="${escapeHtml(item.id)}">${escapeHtml(settings.guide.label)}</button>`);
+    if (settings.increment.enabled) buttons.push(`<button type="button" data-material-increment="${escapeHtml(item.id)}">${escapeHtml(settings.increment.label)}</button>`);
+    if (settings.move.enabled && settings.move.targetPath) buttons.push(`<button type="button" data-material-move="${escapeHtml(item.id)}">${escapeHtml(settings.move.label)}</button>`);
+    return buttons.join("");
+  }
+
   function materialRows() {
     const categories = state.materials?.categories || [];
     return categories.map((category) => `
@@ -273,23 +336,69 @@
         ${state.openMaterials.has(category.id) ? "open" : ""}>
         <summary data-move-target-path="${escapeHtml(category.path)}"><span class="tb-folder-icon"></span><b title="${escapeHtml(category.name)}">${escapeHtml(category.name)}</b><small>${Number(category.count || 0)}</small></summary>
         <div class="tb-tree-items">
-          ${category.loaded ? (category.items || []).map((item) => `
-            <article class="tb-work-row ${item.usage?.status === "used" ? "is-used" : ""}" draggable="${item.usage?.status === "used" ? "false" : "true"}"
+          ${category.loaded ? (category.items || []).filter(materialMatchesFilter).map((item) => `
+            <article class="tb-work-row" draggable="true"
               data-entry-kind="material" data-entry-id="${escapeHtml(item.id)}"
               data-move-source-kind="material" data-move-source-id="${escapeHtml(item.id)}">
               <span class="tb-post-folder" aria-hidden="true"><i class="tb-folder-icon"></i></span>
               <span class="tb-work-copy">
                 <span class="tb-work-name" title="${escapeHtml(item.path || item.name)}">${escapeHtml(item.name)}</span>
-                <small>${Number(item.imageCount || 0)} 张图 · ${Number(item.textCount || 0)} 个文档${item.usage?.status === "used" ? " · 已使用" : item.usage?.status === "prepared" ? " · 已加入 GPT" : ""}</small>
+                <span class="tb-material-meta"><i>${escapeHtml(item.mainTag || "团建转化")}</i><em>${Number(item.usageCount || 0)} 次</em><code title="文件夹哈希 ${escapeHtml(item.folderHash || "")}">${escapeHtml((item.folderHash || "").slice(0, 8))}</code></span>
+                <small>${Number(item.imageCount || 0)} 张图 · ${Number(item.textCount || 0)} 个文档${item.mainTagSource === "manual" ? " · 人工标签" : " · 自动识别"}</small>
               </span>
-              <button type="button" data-upload-material="${escapeHtml(item.id)}" ${item.usage?.status === "used" ? "disabled" : ""}>
-                ${item.usage?.status === "used" ? "已使用" : "传 GPT"}
-              </button>
+              <span class="tb-material-actions">${materialActionButtons(item)}<button type="button" class="tb-primary-action" data-upload-material="${escapeHtml(item.id)}">传 GPT</button></span>
             </article>
-          `).join("") : `<div class="tb-empty compact">展开后读取这个文件夹</div>`}
+          `).join("") || `<div class="tb-empty compact">当前筛选下没有素材</div>` : `<div class="tb-empty compact">展开后读取这个文件夹并生成哈希</div>`}
         </div>
       </details>
     `).join("") || `<div class="tb-empty">素材目录中还没有识别到“图片 + 文案”帖子</div>`;
+  }
+
+  function materialFilterBar() {
+    const tagButtons = ["全部", "团建游戏", "团建转化", "合集攻略"].map((tag) => (
+      `<button type="button" data-filter-main-tag="${tag}" data-active="${String(state.materialFilter.mainTag === tag)}">${tag}</button>`
+    )).join("");
+    return `
+      <div class="tb-material-filter">
+        <div>${tagButtons}</div>
+        <select data-filter-usage aria-label="按使用次数筛选">
+          <option value="all" ${state.materialFilter.usage === "all" ? "selected" : ""}>全部次数</option>
+          <option value="0" ${state.materialFilter.usage === "0" ? "selected" : ""}>未使用</option>
+          <option value="1" ${state.materialFilter.usage === "1" ? "selected" : ""}>使用 1 次</option>
+          <option value="2" ${state.materialFilter.usage === "2" ? "selected" : ""}>使用 2 次</option>
+          <option value="3+" ${state.materialFilter.usage === "3+" ? "selected" : ""}>使用 3 次以上</option>
+        </select>
+        <input data-filter-query value="${escapeHtml(state.materialFilter.query)}" placeholder="搜索名称、标签或哈希">
+        <button type="button" data-open-material-settings title="设置文件夹按钮">⚙</button>
+      </div>`;
+  }
+
+  function materialSettingsFields() {
+    const rows = [
+      ["game", "团建游戏"],
+      ["conversion", "团建转化"],
+      ["guide", "合集攻略"],
+      ["increment", "使用次数 +1"],
+      ["move", "移动到固定目录"]
+    ];
+    return rows.map(([key, title]) => {
+      const setting = state.actionSettings[key];
+      return `<label class="tb-setting-row">
+        <input type="checkbox" data-action-enabled="${key}" ${setting.enabled ? "checked" : ""}>
+        <span>${title}</span>
+        <input data-action-label="${key}" value="${escapeHtml(setting.label)}" maxlength="8" aria-label="${title}按钮名称">
+      </label>`;
+    }).join("");
+  }
+
+  function renderMaterialSettings() {
+    const root = document.getElementById(ROOT_ID);
+    const dialog = root?.querySelector("[data-material-settings]");
+    if (!dialog) return;
+    dialog.hidden = !state.settingsOpen;
+    if (!state.settingsOpen) return;
+    dialog.querySelector("[data-action-fields]").innerHTML = materialSettingsFields();
+    dialog.querySelector("[data-action-move-target]").value = state.actionSettings.move.targetPath || "";
   }
 
   function renderBody() {
@@ -303,7 +412,9 @@
       ? `<b>${Number(production.uniqueImageGroups || 0)}</b> 组历史 · 精确 ${Number(production.exactHashGroups || 0)} · 视觉 ${Number(production.perceptualHashGroups || 0)}`
       : "历史去重库尚未连接";
     root.querySelector("[data-products]").innerHTML = productRows();
+    root.querySelector("[data-material-filter]").innerHTML = materialFilterBar();
     root.querySelector("[data-materials]").innerHTML = materialRows();
+    renderMaterialSettings();
   }
 
   function render() {
@@ -333,6 +444,7 @@
             <input data-material-path aria-label="素材库路径" placeholder="粘贴素材文件夹路径">
             <button type="submit" title="读取素材目录">↻</button>
           </form>
+          <div data-material-filter></div>
           <div class="tb-zone-scroll" data-materials></div>
         </section>
         <section class="tb-upload-queue" data-upload-queue hidden></section>
@@ -345,6 +457,15 @@
               <button type="button" data-confirm-move>确认移动</button>
             </footer>
           </div>
+        </section>
+        <section class="tb-material-settings" data-material-settings hidden role="dialog" aria-modal="true" aria-label="素材文件夹按钮设置">
+          <form data-material-settings-form>
+            <header><b>素材文件夹按钮</b><button type="button" data-close-material-settings aria-label="关闭设置">×</button></header>
+            <p>每个文件夹只保留一个母标签；同义游戏分类统一归入“团建游戏”。</p>
+            <div data-action-fields></div>
+            <label class="tb-move-target"><span>固定移动目录</span><input data-action-move-target placeholder="例如 D:\\素材库\\已处理"></label>
+            <footer><button type="button" data-reset-material-settings>恢复默认</button><button type="submit">保存设置</button></footer>
+          </form>
         </section>
         <footer class="tb-studio-footer"><span data-status>正在连接本地工作台…</span><span class="tb-health" data-health></span><b>拖入对话或点“传 GPT”</b></footer>
       `;
@@ -683,6 +804,44 @@
     }
   }
 
+  function categoryForEntry(entryId) {
+    return (state.materials?.categories || []).find((category) =>
+      (category.items || []).some((item) => item.id === entryId)
+    );
+  }
+
+  async function updateMaterialEntry(entry, changes) {
+    if (!entry?.path) return;
+    setStatus(`正在更新“${entry.name}”…`);
+    const payload = await api("/api/extension/material-metadata", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ entryPath: entry.path, folderHash: entry.folderHash, ...changes })
+    });
+    const record = payload.record || {};
+    if (record.mainTag) {
+      entry.mainTag = record.mainTag;
+      entry.mainTagSource = record.mainTagSource || "manual";
+    }
+    if (Number.isFinite(Number(record.usageCount))) entry.usageCount = Number(record.usageCount);
+    if (Array.isArray(record.tags)) entry.tags = record.tags;
+    renderBody();
+    setStatus(`已更新“${entry.name}”`, "success");
+  }
+
+  function saveMaterialActionSettings(form) {
+    const next = JSON.parse(JSON.stringify(DEFAULT_ACTION_SETTINGS));
+    for (const key of Object.keys(next)) {
+      next[key].enabled = Boolean(form.querySelector(`[data-action-enabled="${key}"]`)?.checked);
+      next[key].label = form.querySelector(`[data-action-label="${key}"]`)?.value || next[key].label;
+    }
+    next.move.targetPath = form.querySelector("[data-action-move-target]")?.value || "";
+    storeActionSettings(next);
+    state.settingsOpen = false;
+    renderBody();
+    setStatus("素材按钮设置已保存", "success");
+  }
+
   async function loadProductFolder(folderPath) {
     setStatus(`正在读取 ${fileName(folderPath)}…`);
     const payload = await api(`/api/extension/product-tree?path=${encodeURIComponent(folderPath)}`);
@@ -786,6 +945,10 @@
       event.preventDefault();
       savePaths("material", event.target.querySelector("[data-material-path]").value.trim()).catch((error) => setStatus(error.message, "danger"));
     }
+    if (event.target.matches(`#${ROOT_ID} [data-material-settings-form]`)) {
+      event.preventDefault();
+      saveMaterialActionSettings(event.target);
+    }
   });
 
   document.addEventListener("paste", (event) => {
@@ -797,6 +960,48 @@
     if (event.target.closest(`#${ROOT_ID} [data-collapse], #${LAUNCHER_ID}`)) {
       state.collapsed = !state.collapsed;
       applyLayout();
+      return;
+    }
+    const filterTag = event.target.closest(`#${ROOT_ID} [data-filter-main-tag]`);
+    if (filterTag) {
+      state.materialFilter.mainTag = filterTag.dataset.filterMainTag;
+      renderBody();
+      return;
+    }
+    if (event.target.closest(`#${ROOT_ID} [data-open-material-settings]`)) {
+      state.settingsOpen = true;
+      renderMaterialSettings();
+      return;
+    }
+    if (event.target.closest(`#${ROOT_ID} [data-close-material-settings]`)) {
+      state.settingsOpen = false;
+      renderMaterialSettings();
+      return;
+    }
+    if (event.target.closest(`#${ROOT_ID} [data-reset-material-settings]`)) {
+      storeActionSettings(DEFAULT_ACTION_SETTINGS);
+      renderMaterialSettings();
+      return;
+    }
+    const tagAction = event.target.closest(`#${ROOT_ID} [data-material-main-tag]`);
+    if (tagAction) {
+      const entry = findEntry("material", tagAction.dataset.materialId);
+      updateMaterialEntry(entry, { mainTag: tagAction.dataset.materialMainTag }).catch((error) => setStatus(error.message, "danger"));
+      return;
+    }
+    const incrementAction = event.target.closest(`#${ROOT_ID} [data-material-increment]`);
+    if (incrementAction) {
+      const entry = findEntry("material", incrementAction.dataset.materialIncrement);
+      updateMaterialEntry(entry, { incrementUsage: true }).catch((error) => setStatus(error.message, "danger"));
+      return;
+    }
+    const moveAction = event.target.closest(`#${ROOT_ID} [data-material-move]`);
+    if (moveAction) {
+      const entry = findEntry("material", moveAction.dataset.materialMove);
+      if (entry?.path && state.actionSettings.move.targetPath) {
+        state.pendingMove = { entry: { ...entry, entryKind: "material" }, targetPath: state.actionSettings.move.targetPath };
+        renderMoveDialog();
+      }
       return;
     }
     const cancel = event.target.closest(`#${ROOT_ID} [data-cancel-upload]`);
@@ -839,6 +1044,21 @@
     if (productUpload) uploadEntry({ ...findEntry("product", productUpload.dataset.uploadProduct), entryKind: "product" });
     const materialUpload = event.target.closest(`#${ROOT_ID} [data-upload-material]`);
     if (materialUpload) uploadEntry({ ...findEntry("material", materialUpload.dataset.uploadMaterial), entryKind: "material" });
+  });
+
+  document.addEventListener("change", (event) => {
+    const usage = event.target.closest?.(`#${ROOT_ID} [data-filter-usage]`);
+    if (!usage) return;
+    state.materialFilter.usage = usage.value;
+    renderBody();
+  });
+
+  document.addEventListener("input", (event) => {
+    const query = event.target.closest?.(`#${ROOT_ID} [data-filter-query]`);
+    if (!query) return;
+    state.materialFilter.query = query.value;
+    const materials = document.querySelector(`#${ROOT_ID} [data-materials]`);
+    if (materials) materials.innerHTML = materialRows();
   });
 
   document.addEventListener("toggle", (event) => {
@@ -955,7 +1175,8 @@
   });
 
   render();
-  readStoredPaths().then((paths) => {
+  Promise.all([readStoredPaths(), readActionSettings()]).then(([paths, actionSettings]) => {
+    state.actionSettings = actionSettings;
     storePaths(paths);
     renderBody();
     return refresh();
