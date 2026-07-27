@@ -15,7 +15,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.0");
+  assert.equal(manifest.version, "0.2.1");
 });
 
 test("右侧生产舱同时声明成品、素材、路径设置和附件上传入口", () => {
@@ -119,7 +119,13 @@ test("素材文件夹支持单一母标签、哈希、次数筛选和自定义�
   assert.match(source, /data-filter-usage/);
   assert.match(source, /data-filter-query/);
   assert.match(source, /\/api\/extension\/material-metadata/);
+  assert.match(source, /\/api\/extension\/material-index/);
   assert.match(source, /incrementUsage: true/);
+  assert.match(source, /globalMaterialRows/);
+  assert.match(source, /usageSource/);
+  assert.match(source, /待核对/);
+  assert.match(source, /stats\?\.byMainTag/);
+  assert.match(source, /stats\?\.byUsage/);
   assert.match(source, /ACTION_STORAGE_KEY/);
   assert.match(source, /每个文件夹只保留一个母标签/);
   assert.match(css, /\.tb-material-filter/);

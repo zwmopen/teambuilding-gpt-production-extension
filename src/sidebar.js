@@ -19,6 +19,7 @@
   const state = {
     workspace: null,
     materials: null,
+    materialIndex: null,
     paths: { ...DEFAULT_PATHS },
     productTree: null,
     productChildren: {},
@@ -45,6 +46,7 @@
   };
   let remountQueued = false;
   let refreshTimer = null;
+  let materialIndexTimer = null;
   localStorage.removeItem("tb-studio-collapsed");
 
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
@@ -329,47 +331,98 @@
     return buttons.join("");
   }
 
+  function materialRow(item, indexed = false) {
+    return `
+      <article class="tb-work-row" draggable="${indexed ? "false" : "true"}"
+        data-entry-kind="material" data-entry-id="${escapeHtml(item.id)}"
+        data-index-category="${escapeHtml(item.categoryId || "")}"
+        data-indexed="${String(indexed)}"
+        data-move-source-kind="material" data-move-source-id="${escapeHtml(item.id)}">
+        <span class="tb-post-folder" aria-hidden="true"><i class="tb-folder-icon"></i></span>
+        <span class="tb-work-copy">
+          <span class="tb-work-name" title="${escapeHtml(item.path || item.name)}">${escapeHtml(item.name)}</span>
+          <span class="tb-material-meta"><i>${escapeHtml(item.mainTag || "团建转化")}</i><em>${Number(item.usageCount || 0)} 次</em><code title="文件夹哈希 ${escapeHtml(item.folderHash || "")}">${escapeHtml((item.folderHash || "").slice(0, 8))}</code></span>
+          <small>${Number(item.imageCount || 0)} 张图 · ${Number(item.textCount || 0)} 个文档${item.mainTagSource === "manual" ? " · 人工标签" : " · 自动识别"}${item.usageSource ? ` · ${escapeHtml(item.usageSource)}` : ""}</small>
+        </span>
+        <span class="tb-material-actions">${materialActionButtons(item)}<button type="button" class="tb-primary-action" data-upload-material="${escapeHtml(item.id)}" data-index-category="${escapeHtml(item.categoryId || "")}">传 GPT</button></span>
+      </article>`;
+  }
+
+  function materialFilterActive() {
+    return state.materialFilter.mainTag !== "全部"
+      || state.materialFilter.usage !== "all"
+      || Boolean(String(state.materialFilter.query || "").trim());
+  }
+
+  function globalMaterialRows() {
+    const index = state.materialIndex;
+    if (!index?.items?.length) {
+      const progress = index?.status === "running"
+        ? `正在建立全库索引：${Number(index.processedCategories || 0)}/${Number(index.totalCategories || 0)} 个分类，已识别 ${Number(index.indexedItems || 0)} 条`
+        : "全库索引尚未完成";
+      return `<div class="tb-empty">${progress}</div>`;
+    }
+    const filtered = index.items.filter(materialMatchesFilter);
+    const visible = filtered
+      .slice()
+      .sort((left, right) => Number(right.usageCount || 0) - Number(left.usageCount || 0)
+        || String(left.name || "").localeCompare(String(right.name || ""), "zh-Hans-CN"))
+      .slice(0, 240);
+    const groups = new Map();
+    visible.forEach((item) => {
+      const key = item.categoryId || item.categoryName || "其他";
+      if (!groups.has(key)) groups.set(key, { id: key, name: item.categoryName || "其他", items: [] });
+      groups.get(key).items.push(item);
+    });
+    const rows = Array.from(groups.values()).map((category) => `
+      <details class="tb-tree-group tb-index-results" open>
+        <summary><span class="tb-folder-icon"></span><b>${escapeHtml(category.name)}</b><small>${category.items.length}</small></summary>
+        <div class="tb-tree-items">${category.items.map((item) => materialRow(item, true)).join("")}</div>
+      </details>
+    `).join("");
+    if (!rows) return `<div class="tb-empty">全库筛选下没有匹配素材</div>`;
+    return `<div class="tb-index-result-note">全库匹配 ${filtered.length} 条${filtered.length > visible.length ? `，当前显示前 ${visible.length} 条，请继续输入关键词缩小范围` : ""}</div>${rows}`;
+  }
+
   function materialRows() {
+    if (materialFilterActive()) return globalMaterialRows();
     const categories = state.materials?.categories || [];
     return categories.map((category) => `
       <details class="tb-tree-group" data-category="${escapeHtml(category.id)}"
         ${state.openMaterials.has(category.id) ? "open" : ""}>
         <summary data-move-target-path="${escapeHtml(category.path)}"><span class="tb-folder-icon"></span><b title="${escapeHtml(category.name)}">${escapeHtml(category.name)}</b><small>${Number(category.count || 0)}</small></summary>
         <div class="tb-tree-items">
-          ${category.loaded ? (category.items || []).filter(materialMatchesFilter).map((item) => `
-            <article class="tb-work-row" draggable="true"
-              data-entry-kind="material" data-entry-id="${escapeHtml(item.id)}"
-              data-move-source-kind="material" data-move-source-id="${escapeHtml(item.id)}">
-              <span class="tb-post-folder" aria-hidden="true"><i class="tb-folder-icon"></i></span>
-              <span class="tb-work-copy">
-                <span class="tb-work-name" title="${escapeHtml(item.path || item.name)}">${escapeHtml(item.name)}</span>
-                <span class="tb-material-meta"><i>${escapeHtml(item.mainTag || "团建转化")}</i><em>${Number(item.usageCount || 0)} 次</em><code title="文件夹哈希 ${escapeHtml(item.folderHash || "")}">${escapeHtml((item.folderHash || "").slice(0, 8))}</code></span>
-                <small>${Number(item.imageCount || 0)} 张图 · ${Number(item.textCount || 0)} 个文档${item.mainTagSource === "manual" ? " · 人工标签" : " · 自动识别"}</small>
-              </span>
-              <span class="tb-material-actions">${materialActionButtons(item)}<button type="button" class="tb-primary-action" data-upload-material="${escapeHtml(item.id)}">传 GPT</button></span>
-            </article>
-          `).join("") || `<div class="tb-empty compact">当前筛选下没有素材</div>` : `<div class="tb-empty compact">展开后读取这个文件夹并生成哈希</div>`}
+          ${category.loaded ? (category.items || []).map((item) => materialRow(item)).join("")
+            || `<div class="tb-empty compact">这个分类没有素材</div>`
+            : `<div class="tb-empty compact">展开后读取这个文件夹并生成哈希</div>`}
         </div>
       </details>
     `).join("") || `<div class="tb-empty">素材目录中还没有识别到“图片 + 文案”帖子</div>`;
   }
 
   function materialFilterBar() {
+    const stats = state.materialIndex?.stats;
     const tagButtons = ["全部", "团建游戏", "团建转化", "合集攻略"].map((tag) => (
-      `<button type="button" data-filter-main-tag="${tag}" data-active="${String(state.materialFilter.mainTag === tag)}">${tag}</button>`
+      `<button type="button" data-filter-main-tag="${tag}" data-active="${String(state.materialFilter.mainTag === tag)}">${tag}<small>${tag === "全部" ? Number(stats?.total || 0) : Number(stats?.byMainTag?.[tag] || 0)}</small></button>`
     )).join("");
+    const progress = state.materialIndex?.status === "running"
+      ? `索引 ${Number(state.materialIndex.processedCategories || 0)}/${Number(state.materialIndex.totalCategories || 0)}`
+      : state.materialIndex?.generatedAt
+        ? `已索引 ${Number(stats?.total || 0)} · 待核对 ${Number(stats?.review || 0)}`
+        : "准备建立全库索引";
     return `
       <div class="tb-material-filter">
         <div>${tagButtons}</div>
         <select data-filter-usage aria-label="按使用次数筛选">
-          <option value="all" ${state.materialFilter.usage === "all" ? "selected" : ""}>全部次数</option>
-          <option value="0" ${state.materialFilter.usage === "0" ? "selected" : ""}>未使用</option>
-          <option value="1" ${state.materialFilter.usage === "1" ? "selected" : ""}>使用 1 次</option>
-          <option value="2" ${state.materialFilter.usage === "2" ? "selected" : ""}>使用 2 次</option>
-          <option value="3+" ${state.materialFilter.usage === "3+" ? "selected" : ""}>使用 3 次以上</option>
+          <option value="all" ${state.materialFilter.usage === "all" ? "selected" : ""}>全部次数 ${Number(stats?.total || 0)}</option>
+          <option value="0" ${state.materialFilter.usage === "0" ? "selected" : ""}>未使用 ${Number(stats?.byUsage?.unused || 0)}</option>
+          <option value="1" ${state.materialFilter.usage === "1" ? "selected" : ""}>使用 1 次 ${Number(stats?.byUsage?.once || 0)}</option>
+          <option value="2" ${state.materialFilter.usage === "2" ? "selected" : ""}>使用 2 次 ${Number(stats?.byUsage?.twice || 0)}</option>
+          <option value="3+" ${state.materialFilter.usage === "3+" ? "selected" : ""}>使用 3 次以上 ${Number(stats?.byUsage?.threePlus || 0)}</option>
         </select>
         <input data-filter-query value="${escapeHtml(state.materialFilter.query)}" placeholder="搜索名称、标签或哈希">
         <button type="button" data-open-material-settings title="设置文件夹按钮">⚙</button>
+        <small class="tb-index-status">${progress}</small>
       </div>`;
   }
 
@@ -642,6 +695,16 @@
       })
     });
     entry.usage = payload.record;
+    if (status === "used") {
+      entry.usageCount = Math.max(0, Number(entry.usageCount || 0)) + 1;
+      entry.usageSource = "历史日志 + 扩展实时记录";
+      const indexed = (state.materialIndex?.items || []).find((item) => item.id === entry.id);
+      if (indexed && indexed !== entry) {
+        indexed.usageCount = entry.usageCount;
+        indexed.usageSource = entry.usageSource;
+      }
+      recalculateLocalIndexStats();
+    }
     renderBody();
     return payload.record;
   }
@@ -786,7 +849,7 @@
       const item = (category.items || []).find((entry) => entry.id === id);
       if (item) return item;
     }
-    return null;
+    return (state.materialIndex?.items || []).find((entry) => entry.id === id) || null;
   }
 
   async function loadCategory(categoryId) {
@@ -802,6 +865,59 @@
       category.loading = false;
       setStatus(error.message, "danger");
     }
+  }
+
+  function recalculateLocalIndexStats() {
+    const items = state.materialIndex?.items || [];
+    const byMainTag = { 团建游戏: 0, 团建转化: 0, 合集攻略: 0 };
+    const byUsage = { unused: 0, once: 0, twice: 0, threePlus: 0, used: 0 };
+    items.forEach((item) => {
+      if (Object.prototype.hasOwnProperty.call(byMainTag, item.mainTag)) byMainTag[item.mainTag] += 1;
+      const count = Number(item.usageCount || 0);
+      if (count === 0) byUsage.unused += 1;
+      if (count === 1) byUsage.once += 1;
+      if (count === 2) byUsage.twice += 1;
+      if (count >= 3) byUsage.threePlus += 1;
+      if (count > 0) byUsage.used += 1;
+    });
+    if (state.materialIndex) {
+      state.materialIndex.stats = {
+        ...(state.materialIndex.stats || {}),
+        total: items.length,
+        byMainTag,
+        byUsage
+      };
+    }
+  }
+
+  function scheduleMaterialIndexPoll(delay = 3_000) {
+    clearTimeout(materialIndexTimer);
+    materialIndexTimer = setTimeout(() => {
+      loadMaterialIndex().catch(() => null);
+    }, delay);
+  }
+
+  async function loadMaterialIndex(refreshIndex = false) {
+    const payload = await api(`/api/extension/material-index${refreshIndex ? "?refresh=true" : ""}`);
+    state.materialIndex = payload.index || null;
+    renderBody();
+    if (state.materialIndex?.status === "running") {
+      setStatus(`正在建立全库素材索引：${Number(state.materialIndex.processedCategories || 0)}/${Number(state.materialIndex.totalCategories || 0)}`);
+      scheduleMaterialIndexPoll();
+    } else if (state.materialIndex?.status === "failed") {
+      setStatus(`素材索引失败：${state.materialIndex.error || "未知错误"}`, "danger");
+    } else if (state.materialIndex?.status === "complete") {
+      setStatus(`全库索引完成：${Number(state.materialIndex.stats?.total || 0)} 条素材，${Number(state.materialIndex.stats?.review || 0)} 条待核对`, "success");
+    }
+    return state.materialIndex;
+  }
+
+  async function materialEntryForUpload(id, categoryId) {
+    let entry = findEntry("material", id);
+    if (entry?.attachments?.length) return entry;
+    if (categoryId) await loadCategory(categoryId);
+    entry = findEntry("material", id);
+    return entry;
   }
 
   function categoryForEntry(entryId) {
@@ -825,6 +941,23 @@
     }
     if (Number.isFinite(Number(record.usageCount))) entry.usageCount = Number(record.usageCount);
     if (Array.isArray(record.tags)) entry.tags = record.tags;
+    const indexed = (state.materialIndex?.items || []).find((item) => item.id === entry.id);
+    if (indexed && indexed !== entry) Object.assign(indexed, {
+      mainTag: entry.mainTag,
+      mainTagSource: entry.mainTagSource,
+      usageCount: entry.usageCount,
+      tags: entry.tags
+    });
+    for (const category of state.materials?.categories || []) {
+      const loaded = (category.items || []).find((item) => item.id === entry.id);
+      if (loaded && loaded !== entry) Object.assign(loaded, {
+        mainTag: entry.mainTag,
+        mainTagSource: entry.mainTagSource,
+        usageCount: entry.usageCount,
+        tags: entry.tags
+      });
+    }
+    recalculateLocalIndexStats();
     renderBody();
     setStatus(`已更新“${entry.name}”`, "success");
   }
@@ -874,13 +1007,15 @@
       const previousCategories = new Map(
         (state.materials?.categories || []).map((category) => [category.id, category])
       );
-      const [workspace, materials, productTree] = await Promise.all([
+      const [workspace, materials, productTree, materialIndex] = await Promise.all([
         api("/api/extension/workspace"),
         api("/api/materials"),
-        api("/api/extension/product-tree")
+        api("/api/extension/product-tree"),
+        api("/api/extension/material-index")
       ]);
       state.workspace = workspace;
       state.productTree = productTree.tree;
+      state.materialIndex = materialIndex.index || null;
       const nextProductRoot = workspace?.settings?.workPackage?.libraryPath || state.paths.productRoot;
       const nextMaterialRoot = materials.materials?.root || state.paths.materialRoot;
       const productRootChanged = previousProductRoot !== nextProductRoot;
@@ -911,6 +1046,7 @@
       renderBody();
       renderHealth();
       setStatus("本地工作台已连接", "success");
+      if (state.materialIndex?.status === "running") scheduleMaterialIndexPoll();
       scheduleRefresh(60_000);
     } catch {
       state.connected = false;
@@ -1043,7 +1179,15 @@
     const productUpload = event.target.closest(`#${ROOT_ID} [data-upload-product]`);
     if (productUpload) uploadEntry({ ...findEntry("product", productUpload.dataset.uploadProduct), entryKind: "product" });
     const materialUpload = event.target.closest(`#${ROOT_ID} [data-upload-material]`);
-    if (materialUpload) uploadEntry({ ...findEntry("material", materialUpload.dataset.uploadMaterial), entryKind: "material" });
+    if (materialUpload) {
+      materialEntryForUpload(
+        materialUpload.dataset.uploadMaterial,
+        materialUpload.dataset.indexCategory
+      ).then((entry) => {
+        if (!entry?.attachments?.length) throw new Error("素材详情尚未读取完成，请稍后再试");
+        uploadEntry({ ...entry, entryKind: "material" });
+      }).catch((error) => setStatus(error.message, "danger"));
+    }
   });
 
   document.addEventListener("change", (event) => {
