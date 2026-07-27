@@ -15,7 +15,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.1");
+  assert.equal(manifest.version, "0.2.2");
 });
 
 test("右侧生产舱同时声明成品、素材、路径设置和附件上传入口", () => {
@@ -109,11 +109,15 @@ test("右侧文件树支持经确认的真实文件夹移动", () => {
   assert.match(css, /\.tb-move-confirm/);
 });
 
-test("素材文件夹支持单一母标签、哈希、次数筛选和自定义按钮", () => {
+test("素材文件夹支持母标签、季节节日分组、哈希、次数筛选和自定义按钮", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const css = fs.readFileSync(path.join(root, "sidebar.css"), "utf8");
   assert.match(source, /\["全部", "团建游戏", "团建转化", "合集攻略"\]/);
   assert.match(source, /item\.mainTag !== mainTag/);
+  assert.match(source, /SEASON_TAGS/);
+  assert.match(source, /HOLIDAY_TAGS/);
+  assert.match(source, /data-filter-dimension/);
+  assert.match(source, /materialHasGroupedTag/);
   assert.match(source, /item\.folderHash/);
   assert.match(source, /item\.usageCount/);
   assert.match(source, /data-filter-usage/);
@@ -129,6 +133,8 @@ test("素材文件夹支持单一母标签、哈希、次数筛选和自定义�
   assert.match(source, /ACTION_STORAGE_KEY/);
   assert.match(source, /每个文件夹只保留一个母标签/);
   assert.match(css, /\.tb-material-filter/);
+  assert.match(css, /\.tb-filter-dimensions/);
+  assert.match(css, /\.tb-filter-group/);
   assert.match(css, /\.tb-material-meta/);
   assert.match(css, /\.tb-material-settings/);
 });

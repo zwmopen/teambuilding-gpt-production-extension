@@ -5,6 +5,29 @@
   const DROP_OVERLAY_ID = "tb-gpt-production-drop-overlay";
   const PATH_STORAGE_KEY = "tb-production-paths";
   const ACTION_STORAGE_KEY = "tb-material-action-settings";
+  const SEASON_TAGS = Object.freeze({
+    春季: ["春季", "春天", "春日"],
+    夏季: ["夏季", "夏天", "夏日", "夏季团建"],
+    秋季: ["秋季", "秋天", "秋日"],
+    冬季: ["冬季", "冬天", "冬日"]
+  });
+  const HOLIDAY_TAGS = Object.freeze({
+    元旦: ["元旦", "跨年"],
+    春节: ["春节", "过年", "除夕"],
+    元宵节: ["元宵节", "元宵"],
+    情人节: ["情人节"],
+    妇女节: ["妇女节", "女神节", "三八"],
+    清明节: ["清明节", "清明"],
+    劳动节: ["劳动节", "五一"],
+    青年节: ["青年节", "五四"],
+    儿童节: ["儿童节", "六一"],
+    端午节: ["端午节", "端午"],
+    七夕: ["七夕"],
+    中秋节: ["中秋节", "中秋"],
+    重阳节: ["重阳节", "重阳"],
+    国庆节: ["国庆节", "国庆"],
+    圣诞节: ["圣诞节", "圣诞"]
+  });
   const DEFAULT_ACTION_SETTINGS = Object.freeze({
     game: { enabled: true, label: "游戏" },
     conversion: { enabled: true, label: "转化" },
@@ -25,7 +48,7 @@
     productChildren: {},
     openProducts: new Set(),
     openMaterials: new Set(),
-    materialFilter: { mainTag: "全部", usage: "all", query: "" },
+    materialFilter: { mainTag: "全部", season: "全部", holiday: "全部", usage: "all", query: "" },
     actionSettings: JSON.parse(JSON.stringify(DEFAULT_ACTION_SETTINGS)),
     settingsOpen: false,
     busy: false,
@@ -305,8 +328,10 @@
   }
 
   function materialMatchesFilter(item) {
-    const { mainTag, usage, query } = state.materialFilter;
+    const { mainTag, season, holiday, usage, query } = state.materialFilter;
     if (mainTag !== "全部" && item.mainTag !== mainTag) return false;
+    if (season !== "全部" && !materialHasGroupedTag(item, SEASON_TAGS, season)) return false;
+    if (holiday !== "全部" && !materialHasGroupedTag(item, HOLIDAY_TAGS, holiday)) return false;
     const count = Number(item.usageCount || 0);
     if (usage === "0" && count !== 0) return false;
     if (usage === "1" && count !== 1) return false;
@@ -318,6 +343,20 @@
       if (!haystack.includes(needle)) return false;
     }
     return true;
+  }
+
+  function materialHasGroupedTag(item, groups, value) {
+    const aliases = groups[value] || [];
+    const tags = new Set((item.tags || []).map((tag) => String(tag).trim()));
+    return aliases.some((alias) => tags.has(alias));
+  }
+
+  function groupedTagCounts(groups) {
+    const items = state.materialIndex?.items || [];
+    return Object.fromEntries(Object.keys(groups).map((value) => [
+      value,
+      items.filter((item) => materialHasGroupedTag(item, groups, value)).length
+    ]));
   }
 
   function materialActionButtons(item) {
@@ -350,6 +389,8 @@
 
   function materialFilterActive() {
     return state.materialFilter.mainTag !== "全部"
+      || state.materialFilter.season !== "全部"
+      || state.materialFilter.holiday !== "全部"
       || state.materialFilter.usage !== "all"
       || Boolean(String(state.materialFilter.query || "").trim());
   }
@@ -405,6 +446,12 @@
     const tagButtons = ["全部", "团建游戏", "团建转化", "合集攻略"].map((tag) => (
       `<button type="button" data-filter-main-tag="${tag}" data-active="${String(state.materialFilter.mainTag === tag)}">${tag}<small>${tag === "全部" ? Number(stats?.total || 0) : Number(stats?.byMainTag?.[tag] || 0)}</small></button>`
     )).join("");
+    const seasonCounts = groupedTagCounts(SEASON_TAGS);
+    const holidayCounts = groupedTagCounts(HOLIDAY_TAGS);
+    const groupedButtons = (dimension, groups, counts) => ["全部", ...Object.keys(groups)]
+      .filter((value) => value === "全部" || Number(counts[value] || 0) > 0)
+      .map((value) => `<button type="button" data-filter-dimension="${dimension}" data-filter-value="${value}" data-active="${String(state.materialFilter[dimension] === value)}">${value}<small>${value === "全部" ? "" : Number(counts[value] || 0)}</small></button>`)
+      .join("");
     const progress = state.materialIndex?.status === "running"
       ? `索引 ${Number(state.materialIndex.processedCategories || 0)}/${Number(state.materialIndex.totalCategories || 0)}`
       : state.materialIndex?.generatedAt
@@ -412,7 +459,17 @@
         : "准备建立全库索引";
     return `
       <div class="tb-material-filter">
-        <div>${tagButtons}</div>
+        <div class="tb-main-filter-row">${tagButtons}</div>
+        <div class="tb-filter-dimensions">
+          <details class="tb-filter-group" ${state.materialFilter.season !== "全部" ? "open" : ""}>
+            <summary>季节${state.materialFilter.season !== "全部" ? ` · ${escapeHtml(state.materialFilter.season)}` : ""}</summary>
+            <div>${groupedButtons("season", SEASON_TAGS, seasonCounts)}</div>
+          </details>
+          <details class="tb-filter-group" ${state.materialFilter.holiday !== "全部" ? "open" : ""}>
+            <summary>节日${state.materialFilter.holiday !== "全部" ? ` · ${escapeHtml(state.materialFilter.holiday)}` : ""}</summary>
+            <div>${groupedButtons("holiday", HOLIDAY_TAGS, holidayCounts)}</div>
+          </details>
+        </div>
         <select data-filter-usage aria-label="按使用次数筛选">
           <option value="all" ${state.materialFilter.usage === "all" ? "selected" : ""}>全部次数 ${Number(stats?.total || 0)}</option>
           <option value="0" ${state.materialFilter.usage === "0" ? "selected" : ""}>未使用 ${Number(stats?.byUsage?.unused || 0)}</option>
@@ -1102,6 +1159,15 @@
     if (filterTag) {
       state.materialFilter.mainTag = filterTag.dataset.filterMainTag;
       renderBody();
+      return;
+    }
+    const groupedFilter = event.target.closest(`#${ROOT_ID} [data-filter-dimension]`);
+    if (groupedFilter) {
+      const dimension = groupedFilter.dataset.filterDimension;
+      if (dimension === "season" || dimension === "holiday") {
+        state.materialFilter[dimension] = groupedFilter.dataset.filterValue;
+        renderBody();
+      }
       return;
     }
     if (event.target.closest(`#${ROOT_ID} [data-open-material-settings]`)) {
