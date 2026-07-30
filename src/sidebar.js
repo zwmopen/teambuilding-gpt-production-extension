@@ -864,6 +864,278 @@
     window.postMessage(result, "*");
   }
 
+  function reportWorkbenchProgress(task, stage, percent, detail = "") {
+    const requestId = task?.entry?.externalRequestId;
+    if (!requestId) return;
+    const result = {
+      source: "tb-gpt-production-extension",
+      type: "tb-workbench-task-progress",
+      requestId,
+      stage: String(stage || ""),
+      percent: Math.max(0, Math.min(100, Number(percent || 0))),
+      detail: String(detail || "")
+    };
+    let bridge = document.getElementById("tb-workbench-bridge-progress");
+    if (!bridge) {
+      bridge = document.createElement("script");
+      bridge.id = "tb-workbench-bridge-progress";
+      bridge.type = "application/json";
+      document.documentElement.appendChild(bridge);
+    }
+    bridge.textContent = JSON.stringify(result);
+    document.dispatchEvent(new Event("tb-workbench-task-progress"));
+    window.postMessage(result, "*");
+  }
+
+  function assistantTurns() {
+    return [...document.querySelectorAll(
+      '[data-message-author-role="assistant"], article[data-turn="assistant"], [data-testid^="conversation-turn"]'
+    )].filter((turn) => {
+      const role = turn.getAttribute("data-message-author-role");
+      if (role) return role === "assistant";
+      return !turn.querySelector('[data-message-author-role="user"]');
+    });
+  }
+
+  function generatingNow() {
+    return [...document.querySelectorAll("button")].some((button) => {
+      const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""} ${button.textContent || ""}`;
+      return /stop generating|stop streaming|停止生成|停止回答/i.test(label);
+    });
+  }
+
+  function platformPauseReason() {
+    if (/\/auth\/(?:login|signup)|\/login(?:[/?#]|$)/i.test(location.href)) {
+      return "GPT 登录状态已失效，请重新登录后继续";
+    }
+    const visibleAlerts = [...document.querySelectorAll(
+      '[role="alert"], [role="dialog"], [data-sonner-toast], [data-testid*="modal"], [data-testid*="dialog"]'
+    )].filter((node) => {
+      const rect = node.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    });
+    const message = visibleAlerts.map((node) => String(node.innerText || node.textContent || "")).join("\n");
+    if (/too many requests|rate limit|usage limit|try again later|请求过多|达到.*上限|稍后再试/i.test(message)) {
+      return "GPT 当前出现频率或额度限制，队列已暂停";
+    }
+    if (/verify you are human|security check|验证码|安全验证|完成验证/i.test(message)) {
+      return "GPT 需要完成登录或安全验证，队列已暂停";
+    }
+    return "";
+  }
+
+  function sendButton() {
+    const target = composer();
+    const scope = target?.closest("form") || target?.parentElement || document;
+    return scope.querySelector('#composer-submit-button:not(:disabled), [data-testid="send-button"]:not(:disabled)')
+      || [...scope.querySelectorAll("button:not(:disabled)")].find((button) => {
+        const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""} ${button.getAttribute("data-testid") || ""}`;
+        return /send|submit|发送|提交/i.test(label);
+      });
+  }
+
+  async function submitComposer() {
+    const target = composer();
+    if (!target) throw new Error("没有找到当前 GPT 输入框");
+    const button = await waitFor(() => sendButton(), 5000);
+    if (button) {
+      button.click();
+      return true;
+    }
+    target.focus();
+    target.dispatchEvent(new KeyboardEvent("keydown", {
+      key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true
+    }));
+    return true;
+  }
+
+  function turnSignature(turns = []) {
+    return turns.map((turn) => {
+      const text = String(turn.innerText || turn.textContent || "").trim();
+      return `${text.length}:${turn.querySelectorAll("img").length}`;
+    }).join("|");
+  }
+
+  async function waitForAssistantCompletion(beforeCount, options = {}) {
+    const timeout = Math.max(30_000, Number(options.timeout || 15 * 60_000));
+    const needImages = Boolean(options.needImages);
+    const started = Date.now();
+    let stableSince = 0;
+    let lastSignature = "";
+    while (Date.now() - started < timeout) {
+      const pauseReason = platformPauseReason();
+      if (pauseReason) throw new Error(pauseReason);
+      const turns = assistantTurns();
+      const freshTurns = turns.slice(beforeCount);
+      const signature = turnSignature(freshTurns);
+      const imageCount = freshTurns.reduce((sum, turn) => sum + turn.querySelectorAll("img").length, 0);
+      const hasContent = freshTurns.length > 0 && freshTurns.some((turn) =>
+        String(turn.innerText || turn.textContent || "").trim().length > 20 || turn.querySelector("img")
+      );
+      if (signature && signature === lastSignature && !generatingNow()) {
+        if (!stableSince) stableSince = Date.now();
+      } else {
+        stableSince = 0;
+        lastSignature = signature;
+      }
+      if (hasContent && (!needImages || imageCount > 0) && stableSince && Date.now() - stableSince >= 10_000) {
+        return { turns: freshTurns, imageCount };
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1000));
+    }
+    throw new Error(needImages ? "等待套图完成超时，尚未检测到稳定图片结果" : "等待 GPT 回复完成超时");
+  }
+
+  function workPackageBatchId() {
+    const now = new Date();
+    const digits = (value) => String(value).padStart(2, "0");
+    const stamp = `${now.getFullYear()}${digits(now.getMonth() + 1)}${digits(now.getDate())}-${digits(now.getHours())}${digits(now.getMinutes())}${digits(now.getSeconds())}`;
+    return `${stamp}-${Math.random().toString(36).slice(2, 6).padEnd(4, "0")}`;
+  }
+
+  function imageUrl(image) {
+    if (!image) return "";
+    const candidate = String(image.currentSrc || image.src || image.getAttribute?.("src") || "").trim();
+    if (!/^(?:https?:|blob:|data:image\/)/i.test(candidate)) return "";
+    if (/data:image\/svg/i.test(candidate)) return "";
+    const width = Number(image.naturalWidth || image.width || image.getBoundingClientRect?.().width || 0);
+    const height = Number(image.naturalHeight || image.height || image.getBoundingClientRect?.().height || 0);
+    if (width && height && (width < 160 || height < 160)) return "";
+    return candidate;
+  }
+
+  function freshImageUrls(turns) {
+    const buttons = [...new Set(turns.flatMap((turn) => [
+      ...turn.querySelectorAll(".cgpt-conversation-tree-image-download-all")
+    ]))];
+    const images = buttons.flatMap((button) => {
+      if (Array.isArray(button.__cgptImageDownloadImages)) return button.__cgptImageDownloadImages;
+      const container = button.__cgptImageDownloadContainer
+        || button.closest("[data-cgpt-image-download-container]")
+        || button.closest('[data-message-author-role="assistant"]')
+        || button.parentElement;
+      return container ? [...container.querySelectorAll("img")] : [];
+    });
+    if (!images.length) images.push(...turns.flatMap((turn) => [...turn.querySelectorAll("img")]));
+    return [...new Set(images.map(imageUrl).filter(Boolean))];
+  }
+
+  function downloadThroughExtension(url, filename, requestId, timeout = 5 * 60_000) {
+    return new Promise((resolve, reject) => {
+      let timer = null;
+      const finish = (callback, value) => {
+        if (timer) clearTimeout(timer);
+        chrome.runtime.onMessage.removeListener(onMessage);
+        callback(value);
+      };
+      const onMessage = (message) => {
+        if (message?.type !== "tb-download-status" || message.requestId !== requestId) return;
+        if (message.status === "complete") finish(resolve, message.filename || filename);
+        if (message.status === "error") finish(reject, new Error(message.error || "图片下载失败"));
+      };
+      chrome.runtime.onMessage.addListener(onMessage);
+      timer = setTimeout(() => finish(reject, new Error(`图片下载超时：${filename}`)), timeout);
+      chrome.runtime.sendMessage({
+        type: "tb-download",
+        url,
+        filename,
+        requestId,
+        baseUrl: API_ROOT
+      }).then((result) => {
+        if (!result?.ok) finish(reject, new Error(result?.error || "无法启动图片下载"));
+      }).catch((error) => finish(reject, error));
+    });
+  }
+
+  async function downloadFreshImages(turns, task) {
+    reportWorkbenchProgress(task, "下载图片", 68, "正在核对本轮新生成图片");
+    const urls = freshImageUrls(turns);
+    if (!urls.length) throw new Error("检测到生成结果，但没有找到本轮可下载图片");
+    const batchId = workPackageBatchId();
+    const files = [];
+    for (let index = 0; index < urls.length; index += 1) {
+      const url = urls[index];
+      const extensionMatch = url.match(/\.(png|jpe?g|webp|gif|avif)(?:[?#]|$)/i);
+      const extension = extensionMatch ? extensionMatch[1].toLowerCase().replace("jpeg", "jpg") : "png";
+      const filename = `chatgpt-workpkg-${batchId}-${index + 1}-of-${urls.length}.${extension}`;
+      const requestId = `${task.entry.externalRequestId || batchId}-image-${index + 1}`;
+      reportWorkbenchProgress(task, "下载图片", 68 + Math.round(index / urls.length * 8), `正在下载 ${index + 1}/${urls.length}`);
+      files.push(await downloadThroughExtension(url, filename, requestId));
+    }
+    if (files.length !== urls.length) throw new Error(`图片下载不完整：${files.length}/${urls.length}`);
+    return { count: files.length, batchId, files };
+  }
+
+  function cleanAssistantText(turn) {
+    if (!turn) return "";
+    const clone = turn.cloneNode(true);
+    clone.querySelectorAll("button, svg, img, [aria-hidden='true'], .cgpt-conversation-tree-image-download-slot, .cgpt-conversation-tree-text-download-slot")
+      .forEach((node) => node.remove());
+    return String(clone.innerText || clone.textContent || "")
+      .replace(/^\s*(ChatGPT|助手)\s*/i, "")
+      .replace(/\n{3,}/g, "\n\n")
+      .trim();
+  }
+
+  async function runAutomaticProduction(task) {
+    const options = task.entry.autoOptions || {};
+    const taskTimeout = Math.max(5, Number(options.taskTimeoutMinutes || 30)) * 60_000;
+    const initialAssistantCount = assistantTurns().length;
+    reportWorkbenchProgress(task, "提交迁移计划", 18, "附件完成，正在发送母版迁移要求");
+    await submitComposer();
+    await waitForAssistantCompletion(initialAssistantCount, { timeout: Math.min(taskTimeout, 8 * 60_000) });
+    if (options.autoConfirm === false) {
+      reportWorkbenchProgress(task, "等待人工确认", 30, "迁移计划已完成，自动发送 1 已关闭");
+      return { plannedOnly: true };
+    }
+
+    const beforeImagesCount = assistantTurns().length;
+    reportWorkbenchProgress(task, "确认出图", 36, "迁移计划已完成，自动发送 1");
+    fillComposer("1");
+    await submitComposer();
+    const imageResult = await waitForAssistantCompletion(beforeImagesCount, {
+      timeout: taskTimeout,
+      needImages: true
+    });
+    const downloadResult = await downloadFreshImages(imageResult.turns, task);
+    const downloadedImages = downloadResult.count;
+    if (!downloadedImages) throw new Error("图片下载数量为 0，未执行打包");
+    if (options.autoCopy === false) {
+      reportWorkbenchProgress(task, "完成", 100, `已下载 ${downloadedImages} 张图；自动文案已关闭`);
+      return { downloadedImages, textSkipped: true };
+    }
+
+    const beforeTextCount = assistantTurns().length;
+    reportWorkbenchProgress(task, "生成小红书文案", 78, "图片已下载，正在请求本帖文案");
+    fillComposer("给我一份小红书文案");
+    await submitComposer();
+    const textResult = await waitForAssistantCompletion(beforeTextCount, { timeout: 8 * 60_000 });
+    const copyText = cleanAssistantText(textResult.turns[textResult.turns.length - 1]);
+    if (copyText.length < 80) throw new Error("没有检测到完整的小红书文案，未执行打包");
+    await navigator.clipboard.writeText(copyText);
+
+    reportWorkbenchProgress(task, "打包作品", 92, `已下载 ${downloadedImages} 张图，正在写入 TXT 并打包`);
+    if (options.autoPackage === false) {
+      reportWorkbenchProgress(task, "完成", 100, `已下载 ${downloadedImages} 张图并复制文案；自动打包已关闭`);
+      return { downloadedImages, copyText, packageSkipped: true };
+    }
+    const packageResult = await api("/api/extension/work-package", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clipboardText: copyText,
+        title: task.entry.name,
+        conversationUrl: location.href,
+        accountName: localStorage.getItem("tb-workbench-account-id") || "",
+        batchId: downloadResult.batchId,
+        expectedImageCount: downloadedImages
+      })
+    });
+    if (!packageResult?.ok) throw new Error(packageResult?.error || "本地打包没有返回成功");
+    reportWorkbenchProgress(task, "完成", 100, `已打包 ${downloadedImages} 张图片和小红书文案`);
+    return { downloadedImages, packageResult };
+  }
+
   function uploadEntry(entry) {
     if (!entry) return;
     const duplicate = state.uploadTasks.find((task) =>
@@ -938,9 +1210,23 @@
       }, 8000);
       if (!appeared) throw new Error("ChatGPT 没有显示原生附件预览，本次未登记为上传成功");
       fillComposer(instruction(entry));
+      let workflowResult = null;
+      if (entry.autoRun) {
+        reportWorkbenchProgress(task, "附件上传完成", 12, `${files.length} 个文件已进入 GPT`);
+        workflowResult = await runAutomaticProduction(task);
+      }
       task.status = "success";
       task.completed = task.total;
-      reportWorkbenchTask(task, "success", `${files.length} files attached`);
+      const workflowDetail = workflowResult?.plannedOnly
+        ? "迁移计划已生成，等待人工确认"
+        : workflowResult?.packageSkipped
+          ? `已下载 ${workflowResult.downloadedImages || 0} 张图并复制文案`
+          : workflowResult?.textSkipped
+            ? `已下载 ${workflowResult.downloadedImages || 0} 张图`
+            : workflowResult?.packageResult?.packagePath
+              ? `作品已核对并保存到 ${workflowResult.packageResult.packagePath}`
+              : `${files.length} 个文件已上传`;
+      reportWorkbenchTask(task, "success", workflowDetail);
       if (entry.entryKind === "material") {
         state.pendingUsage = entry;
         await recordMaterialUsage(entry, "prepared").catch(() => null);
@@ -1485,7 +1771,9 @@
       imageCount: attachments.filter((filePath) => /\.(?:png|jpe?g|webp|gif|bmp)$/i.test(filePath)).length,
       entryKind: "external",
       customPrompt: prompt,
-      externalRequestId: requestId
+      externalRequestId: requestId,
+      autoRun: Boolean(message.autoRun),
+      autoOptions: message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {}
     });
   }
 

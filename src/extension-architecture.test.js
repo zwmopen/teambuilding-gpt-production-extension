@@ -15,7 +15,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.3");
+  assert.equal(manifest.version, "0.2.4");
 });
 
 test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务", () => {
