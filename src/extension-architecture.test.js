@@ -15,7 +15,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.4");
+  assert.equal(manifest.version, "0.2.11");
 });
 
 test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务", () => {
@@ -27,6 +27,21 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /tb-workbench-task-result/);
   assert.match(source, /customPrompt/);
   assert.match(source, /if \(!isEmbeddedWorkbench\(\)\) render\(\)/);
+  assert.match(source, /\[role="group"\]\[aria-label\]/);
+  assert.match(source, /attachmentPreviewCount\(\) >= previewsBefore \+ files\.length/);
+  assert.match(source, /document\.querySelector\('#composer-submit-button:not\(:disabled\), \[data-testid="send-button"\]:not\(:disabled\)'\)/);
+  assert.match(source, /document\.querySelectorAll\('\[data-message-author-role="user"\]'\)\.length > beforeUserCount/);
+  assert.match(source, /minTextLength:\s*4/);
+  assert.match(source, /planCorrectionSubmitted/);
+  assert.match(source, /GPT 重写后的回复仍不是完整逐页迁移计划/);
+  assert.match(source, /baseUrl:\s*currentApiRoot\(\)/);
+  assert.match(source, /恢复下载图片/);
+  assert.match(source, /task\.workflow\?\.planSubmitted \|\| entry\.retryFromStage/);
+  assert.match(source, /resumeOnly/);
+  assert.match(source, /\/api\/extension\/save-generated-image/);
+  assert.match(source, /等待 30 秒后仍没有找到最近一次生成图片/);
+  assert.match(source, /textCorrectionSubmitted/);
+  assert.match(source, /GPT 重写后的小红书文案仍不完整/);
   assert.match(background, /allowedLocalRoot/);
   assert.match(background, /127\\\.0\\\.0\\\.1/);
 });

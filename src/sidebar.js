@@ -148,6 +148,20 @@
     return result;
   }
 
+  async function recordWorkbenchQuota(entry, kind, count) {
+    if (!entry?.externalRequestId || !entry?.accountId || Number(count || 0) < 1) return null;
+    return api("/api/gpt-production/quota-event", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        accountId: entry.accountId,
+        requestId: entry.externalRequestId,
+        kind,
+        count: Number(count)
+      })
+    });
+  }
+
   function readStoredPaths() {
     return new Promise((resolve) => {
       chrome.storage.local.get(PATH_STORAGE_KEY, (result) => {
@@ -726,10 +740,18 @@
   function attachmentPreviewCount() {
     const scope = document.querySelector("main");
     if (!scope) return 0;
-    return new Set([
+    const previews = new Set([
       ...scope.querySelectorAll('[data-testid*="attachment"]'),
-      ...scope.querySelectorAll('button[aria-label*="Remove attachment"], button[aria-label*="移除附件"]')
-    ]).size;
+      ...scope.querySelectorAll('button[aria-label*="Remove attachment"], button[aria-label*="移除附件"]'),
+      ...scope.querySelectorAll('[role="group"][aria-label]')
+    ]);
+    return [...previews].filter((node) => {
+      const label = String(node.getAttribute?.("aria-label") || "");
+      const className = String(node.className || "");
+      return /attachment|附件|移除附件|remove attachment/i.test(label)
+        || className.includes("file-tile")
+        || /\.(?:png|jpe?g|webp|gif|bmp|txt|md|pdf|docx?|xlsx?)$/i.test(label);
+    }).length;
   }
 
   async function loadFiles(paths, task) {
@@ -841,7 +863,7 @@
     }, 700);
   }
 
-  function reportWorkbenchTask(task, status, detail = "") {
+  function reportWorkbenchTask(task, status, detail = "", extra = {}) {
     const requestId = task?.entry?.externalRequestId;
     if (!requestId) return;
     document.documentElement.dataset.tbGptLastTask = `${requestId}:${status}`;
@@ -850,7 +872,8 @@
       type: "tb-workbench-task-result",
       requestId,
       status,
-      detail: String(detail || "")
+      detail: String(detail || ""),
+      ...(extra && typeof extra === "object" ? extra : {})
     };
     let bridge = document.getElementById("tb-workbench-bridge-result");
     if (!bridge) {
@@ -867,12 +890,14 @@
   function reportWorkbenchProgress(task, stage, percent, detail = "") {
     const requestId = task?.entry?.externalRequestId;
     if (!requestId) return;
+    task.lastStage = String(stage || "");
+    task.lastPercent = Math.max(0, Math.min(100, Number(percent || 0)));
     const result = {
       source: "tb-gpt-production-extension",
       type: "tb-workbench-task-progress",
       requestId,
       stage: String(stage || ""),
-      percent: Math.max(0, Math.min(100, Number(percent || 0))),
+      percent: task.lastPercent,
       detail: String(detail || "")
     };
     let bridge = document.getElementById("tb-workbench-bridge-progress");
@@ -928,7 +953,12 @@
     const target = composer();
     const scope = target?.closest("form") || target?.parentElement || document;
     return scope.querySelector('#composer-submit-button:not(:disabled), [data-testid="send-button"]:not(:disabled)')
+      || document.querySelector('#composer-submit-button:not(:disabled), [data-testid="send-button"]:not(:disabled)')
       || [...scope.querySelectorAll("button:not(:disabled)")].find((button) => {
+        const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""} ${button.getAttribute("data-testid") || ""}`;
+        return /send|submit|发送|提交/i.test(label);
+      })
+      || [...document.querySelectorAll("button:not(:disabled)")].find((button) => {
         const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""} ${button.getAttribute("data-testid") || ""}`;
         return /send|submit|发送|提交/i.test(label);
       });
@@ -937,16 +967,24 @@
   async function submitComposer() {
     const target = composer();
     if (!target) throw new Error("没有找到当前 GPT 输入框");
-    const button = await waitFor(() => sendButton(), 5000);
-    if (button) {
-      button.click();
-      return true;
+    const beforeUserCount = document.querySelectorAll('[data-message-author-role="user"]').length;
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const button = await waitFor(() => sendButton(), 15_000);
+      if (button) button.click();
+      else {
+        target.focus();
+        target.dispatchEvent(new KeyboardEvent("keydown", {
+          key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true
+        }));
+      }
+      const submitted = await waitFor(
+        () => document.querySelectorAll('[data-message-author-role="user"]').length > beforeUserCount,
+        8_000
+      );
+      if (submitted) return true;
+      await new Promise((resolve) => setTimeout(resolve, 2_000));
     }
-    target.focus();
-    target.dispatchEvent(new KeyboardEvent("keydown", {
-      key: "Enter", code: "Enter", keyCode: 13, which: 13, bubbles: true, cancelable: true
-    }));
-    return true;
+    throw new Error("GPT 发送按钮已出现，但没有检测到新消息；任务已暂停，避免重复发送");
   }
 
   function turnSignature(turns = []) {
@@ -959,6 +997,7 @@
   async function waitForAssistantCompletion(beforeCount, options = {}) {
     const timeout = Math.max(30_000, Number(options.timeout || 15 * 60_000));
     const needImages = Boolean(options.needImages);
+    const minTextLength = Math.max(1, Number(options.minTextLength ?? 20));
     const started = Date.now();
     let stableSince = 0;
     let lastSignature = "";
@@ -970,7 +1009,7 @@
       const signature = turnSignature(freshTurns);
       const imageCount = freshTurns.reduce((sum, turn) => sum + turn.querySelectorAll("img").length, 0);
       const hasContent = freshTurns.length > 0 && freshTurns.some((turn) =>
-        String(turn.innerText || turn.textContent || "").trim().length > 20 || turn.querySelector("img")
+        String(turn.innerText || turn.textContent || "").trim().length >= minTextLength || turn.querySelector("img")
       );
       if (signature && signature === lastSignature && !generatingNow()) {
         if (!stableSince) stableSince = Date.now();
@@ -1021,6 +1060,21 @@
   }
 
   function downloadThroughExtension(url, filename, requestId, timeout = 5 * 60_000) {
+    if (isEmbeddedWorkbench()) {
+      return (async () => {
+        const response = await fetch(url, { credentials: "include" });
+        if (!response.ok) throw new Error(`图片读取失败：HTTP ${response.status}`);
+        const contentType = String(response.headers.get("content-type") || "image/png");
+        if (!/^image\//i.test(contentType)) throw new Error(`图片响应类型无效：${contentType}`);
+        const data = bufferToBase64(await response.arrayBuffer());
+        const result = await api("/api/extension/save-generated-image", {
+          method: "POST",
+          body: JSON.stringify({ filename, requestId, contentType, data, sourceUrl: url })
+        });
+        if (!result?.ok || !result.filename) throw new Error(result?.error || "工作台没有保存生成图片");
+        return result.filename;
+      })();
+    }
     return new Promise((resolve, reject) => {
       let timer = null;
       const finish = (callback, value) => {
@@ -1040,7 +1094,7 @@
         url,
         filename,
         requestId,
-        baseUrl: API_ROOT
+        baseUrl: currentApiRoot()
       }).then((result) => {
         if (!result?.ok) finish(reject, new Error(result?.error || "无法启动图片下载"));
       }).catch((error) => finish(reject, error));
@@ -1080,60 +1134,184 @@
   async function runAutomaticProduction(task) {
     const options = task.entry.autoOptions || {};
     const taskTimeout = Math.max(5, Number(options.taskTimeoutMinutes || 30)) * 60_000;
-    const initialAssistantCount = assistantTurns().length;
-    reportWorkbenchProgress(task, "提交迁移计划", 18, "附件完成，正在发送母版迁移要求");
-    await submitComposer();
-    await waitForAssistantCompletion(initialAssistantCount, { timeout: Math.min(taskTimeout, 8 * 60_000) });
+    const workflow = task.workflow || (task.workflow = {});
+    if (/下载图片|download/i.test(String(task.entry.retryFromStage || "")) && !workflow.planDone) {
+      const turns = await waitFor(() => {
+        const currentTurns = assistantTurns();
+        return currentTurns.some((turn) => freshImageUrls([turn]).length) ? currentTurns : null;
+      }, 30_000);
+      if (!turns) {
+        throw new Error("恢复下载失败：等待 30 秒后仍没有找到最近一次生成图片");
+      }
+      let generatedTurnIndex = -1;
+      for (let index = turns.length - 1; index >= 0; index -= 1) {
+        if (freshImageUrls([turns[index]]).length) {
+          generatedTurnIndex = index;
+          break;
+        }
+      }
+      if (generatedTurnIndex < 0) throw new Error("恢复下载失败：当前会话中没有找到最近一次生成图片");
+      workflow.planDone = true;
+      workflow.imageSubmitted = true;
+      workflow.beforeImagesCount = generatedTurnIndex;
+      reportWorkbenchProgress(task, "恢复下载图片", 64, "已找到当前会话最近一次生成结果，不重复提交计划或消耗生图额度");
+    }
+    const initialAssistantCount = workflow.initialAssistantCount ?? assistantTurns().length;
+    workflow.initialAssistantCount = initialAssistantCount;
+    const templateInitialization = task.entry.taskType === "template-init";
+    if (!workflow.planDone) {
+      if (!workflow.planSubmitted) {
+        reportWorkbenchProgress(
+          task,
+          templateInitialization ? "初始化模板" : "提交迁移计划",
+          18,
+          templateInitialization ? "模板附件完成，正在建立当前会话的母版规则" : "附件完成，正在发送母版迁移要求"
+        );
+        workflow.planSubmitted = true;
+        await submitComposer();
+      } else {
+        reportWorkbenchProgress(task, "继续等待迁移计划", 24, "已恢复当前网页中的计划生成，不重复上传或发送");
+      }
+      let planResult = await waitForAssistantCompletion(initialAssistantCount, {
+        timeout: Math.min(taskTimeout, 8 * 60_000),
+        minTextLength: 4
+      });
+      if (!templateInitialization) {
+        let planText = planResult.turns.map(cleanAssistantText).join("\n").trim();
+        const validPlan = () => planText.length >= 80 && /迁移计划|逐页|P\s*1|第\s*1\s*页/i.test(planText);
+        if (!validPlan()) {
+          if (workflow.planCorrectionSubmitted) {
+            throw new Error("GPT 已回复，但没有生成可确认的逐页迁移计划；任务已暂停，未自动发送 1");
+          }
+          workflow.planCorrectionSubmitted = true;
+          const beforeCorrectionCount = assistantTurns().length;
+          reportWorkbenchProgress(task, "纠正迁移计划", 26, "检测到回复过短或缺少逐页计划，正在自动要求 GPT 重写");
+          fillComposer("你刚才没有按要求输出完整逐页迁移计划。请读取本轮全部图片、TXT 和 MD，只输出完整逐页迁移计划，至少包含 P1、对应素材、套用结构、标题、图片处理、文字处理、事实风险与真实感要求，并在结尾明确等待我回复 1。暂时不要出图。");
+          await submitComposer();
+          planResult = await waitForAssistantCompletion(beforeCorrectionCount, {
+            timeout: Math.min(taskTimeout, 8 * 60_000),
+            minTextLength: 20
+          });
+          planText = planResult.turns.map(cleanAssistantText).join("\n").trim();
+          if (!validPlan()) {
+            throw new Error("GPT 重写后的回复仍不是完整逐页迁移计划；任务已暂停，未自动发送 1");
+          }
+        }
+      }
+      workflow.planDone = true;
+    }
+    if (templateInitialization) {
+      reportWorkbenchProgress(task, "模板已就绪", 100, "当前会话已完成母版环境初始化");
+      return { templateInitialized: true, conversationUrl: location.href };
+    }
     if (options.autoConfirm === false) {
       reportWorkbenchProgress(task, "等待人工确认", 30, "迁移计划已完成，自动发送 1 已关闭");
       return { plannedOnly: true };
     }
 
-    const beforeImagesCount = assistantTurns().length;
-    reportWorkbenchProgress(task, "确认出图", 36, "迁移计划已完成，自动发送 1");
-    fillComposer("1");
-    await submitComposer();
-    const imageResult = await waitForAssistantCompletion(beforeImagesCount, {
-      timeout: taskTimeout,
-      needImages: true
-    });
-    const downloadResult = await downloadFreshImages(imageResult.turns, task);
+    if (!workflow.imageSubmitted) {
+      workflow.beforeImagesCount = assistantTurns().length;
+      reportWorkbenchProgress(task, "确认出图", 36, "迁移计划已完成，自动发送 1");
+      fillComposer("1");
+      workflow.imageSubmitted = true;
+      await submitComposer();
+    } else if (!workflow.downloadResult) {
+      reportWorkbenchProgress(task, "继续等待生成图片", 48, "已恢复当前网页中的图片生成，不重复发送 1");
+    }
+    if (!workflow.downloadResult) {
+      const imageResult = await waitForAssistantCompletion(workflow.beforeImagesCount, {
+        timeout: taskTimeout,
+        needImages: true
+      });
+      workflow.downloadResult = await downloadFreshImages(imageResult.turns, task);
+    }
+    const downloadResult = workflow.downloadResult;
     const downloadedImages = downloadResult.count;
     if (!downloadedImages) throw new Error("图片下载数量为 0，未执行打包");
+    await recordWorkbenchQuota(task.entry, "generated", downloadedImages);
     if (options.autoCopy === false) {
       reportWorkbenchProgress(task, "完成", 100, `已下载 ${downloadedImages} 张图；自动文案已关闭`);
-      return { downloadedImages, textSkipped: true };
+      return { downloadedImages, textSkipped: true, batchId: downloadResult.batchId, conversationUrl: location.href };
     }
 
-    const beforeTextCount = assistantTurns().length;
-    reportWorkbenchProgress(task, "生成小红书文案", 78, "图片已下载，正在请求本帖文案");
-    fillComposer("给我一份小红书文案");
-    await submitComposer();
-    const textResult = await waitForAssistantCompletion(beforeTextCount, { timeout: 8 * 60_000 });
-    const copyText = cleanAssistantText(textResult.turns[textResult.turns.length - 1]);
+    if (!workflow.textSubmitted) {
+      workflow.beforeTextCount = assistantTurns().length;
+      reportWorkbenchProgress(task, "生成小红书文案", 78, "图片已下载，正在请求本帖文案");
+      fillComposer("给我一份小红书文案");
+      workflow.textSubmitted = true;
+      await submitComposer();
+    } else if (!workflow.copyText) {
+      reportWorkbenchProgress(task, "继续等待小红书文案", 84, "已恢复当前网页中的文案生成，不重复发送请求");
+    }
+    if (!workflow.copyText) {
+      let textResult = await waitForAssistantCompletion(workflow.beforeTextCount, {
+        timeout: 8 * 60_000,
+        minTextLength: 4
+      });
+      workflow.copyText = cleanAssistantText(textResult.turns[textResult.turns.length - 1]);
+      if (workflow.copyText.length < 80) {
+        if (workflow.textCorrectionSubmitted) {
+          throw new Error("GPT 重写后的小红书文案仍不完整，已停止打包");
+        }
+        workflow.textCorrectionSubmitted = true;
+        const beforeCorrectionCount = assistantTurns().length;
+        reportWorkbenchProgress(task, "纠正文案", 86, "检测到文案过短，正在自动要求 GPT 输出完整版本");
+        fillComposer("你刚才输出的小红书文案不完整。请根据本轮素材和已经生成的封面，重新输出一份不少于 300 字的完整小红书文案，包含标题、正文、行程/玩法要点、适合人群、真实提醒和话题标签。只输出成品文案，不要解释。");
+        await submitComposer();
+        textResult = await waitForAssistantCompletion(beforeCorrectionCount, {
+          timeout: 8 * 60_000,
+          minTextLength: 20
+        });
+        workflow.copyText = cleanAssistantText(textResult.turns[textResult.turns.length - 1]);
+      }
+    }
+    const copyText = workflow.copyText;
     if (copyText.length < 80) throw new Error("没有检测到完整的小红书文案，未执行打包");
     await navigator.clipboard.writeText(copyText);
 
     reportWorkbenchProgress(task, "打包作品", 92, `已下载 ${downloadedImages} 张图，正在写入 TXT 并打包`);
     if (options.autoPackage === false) {
       reportWorkbenchProgress(task, "完成", 100, `已下载 ${downloadedImages} 张图并复制文案；自动打包已关闭`);
-      return { downloadedImages, copyText, packageSkipped: true };
+      return { downloadedImages, copyText, packageSkipped: true, batchId: downloadResult.batchId, conversationUrl: location.href };
     }
-    const packageResult = await api("/api/extension/work-package", {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        clipboardText: copyText,
-        title: task.entry.name,
-        conversationUrl: location.href,
-        accountName: localStorage.getItem("tb-workbench-account-id") || "",
-        batchId: downloadResult.batchId,
-        expectedImageCount: downloadedImages
-      })
-    });
+    const packageResult = workflow.packageResult || await api("/api/extension/work-package", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          clipboardText: copyText,
+          title: task.entry.name,
+          conversationUrl: location.href,
+          accountName: localStorage.getItem("tb-workbench-account-id") || "",
+          batchId: downloadResult.batchId,
+          expectedImageCount: downloadedImages
+        })
+      });
     if (!packageResult?.ok) throw new Error(packageResult?.error || "本地打包没有返回成功");
+    workflow.packageResult = packageResult;
     reportWorkbenchProgress(task, "完成", 100, `已打包 ${downloadedImages} 张图片和小红书文案`);
-    return { downloadedImages, packageResult };
+    let archiveResult = null;
+    if (options.autoArchive !== false && task.entry.taskType === "material" && task.entry.materialPath) {
+      reportWorkbenchProgress(task, "归档素材", 97, "作品已校验，正在登记使用次数并移动原素材");
+      archiveResult = await api("/api/gpt-production/archive-material", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          entryPath: task.entry.materialPath,
+          requestId: task.entry.externalRequestId,
+          templateId: task.entry.templateId || "",
+          conversationUrl: location.href,
+          packagePath: packageResult.packagePath || ""
+        })
+      });
+      if (!archiveResult?.ok) throw new Error(archiveResult?.error || "作品已完成，但素材归档失败");
+    }
+    return {
+      downloadedImages,
+      batchId: downloadResult.batchId,
+      packageResult,
+      archiveResult: archiveResult?.archive || null,
+      conversationUrl: location.href
+    };
   }
 
   function uploadEntry(entry) {
@@ -1170,8 +1348,20 @@
     setBusy(entry, `正在准备“${entry.name}”的文件…`);
     try {
       const paths = (entry.attachments || []).slice(0, 30);
-      if (!paths.length) throw new Error("这个文件夹里没有可上传的图片或文案");
-      const usage = await checkMaterialUsage(entry, task);
+      let files = [];
+      let workflowResult = null;
+      const resumeExistingWorkflow = Boolean(task.workflow?.planSubmitted || entry.retryFromStage);
+      if (!resumeExistingWorkflow && !paths.length) throw new Error("这个文件夹里没有可上传的图片或文案");
+      if (resumeExistingWorkflow) {
+        reportWorkbenchProgress(
+          task,
+          entry.retryFromStage || task.lastStage || "resume current stage",
+          Number(entry.retryFromPercent || task.lastPercent || 18),
+          "resume the active web task without uploading attachments again"
+        );
+        workflowResult = await runAutomaticProduction(task);
+      } else {
+      const usage = entry.externalRequestId ? null : await checkMaterialUsage(entry, task);
       if (usage?.duplicate) {
         task.status = "duplicate";
         task.error = usage.match === "fingerprint"
@@ -1183,7 +1373,7 @@
         setStatus(`已拦截重复素材：${entry.name}`, "danger");
         return;
       }
-      const duplicate = await checkEntryDuplicate(entry, task);
+      const duplicate = entry.externalRequestId ? null : await checkEntryDuplicate(entry, task);
       if (duplicate?.duplicate) {
         task.status = "duplicate";
         task.error = `历史中已存在${duplicate.record?.title ? `：${duplicate.record.title}` : ""}`;
@@ -1191,7 +1381,9 @@
         setStatus(`已拦截重复内容：${entry.name}`, "danger");
         return;
       }
-      const [files, input] = await Promise.all([loadFiles(paths, task), findFileInput()]);
+      const loaded = await Promise.all([loadFiles(paths, task), findFileInput()]);
+      files = loaded[0];
+      const input = loaded[1];
       if (task.controller.signal.aborted) throw new DOMException("上传已取消", "AbortError");
       if (!input) throw new Error("当前 GPT 没有原生附件入口，请先点输入框旁的“+”再重试");
       task.status = "attaching";
@@ -1206,18 +1398,22 @@
       const appeared = await waitFor(() => {
         const first = files[0]?.name;
         const mainText = document.querySelector("main")?.innerText || "";
-        return (first && mainText.includes(first)) || attachmentPreviewCount() > previewsBefore;
-      }, 8000);
+        return (first && mainText.includes(first))
+          || attachmentPreviewCount() >= previewsBefore + files.length;
+      }, 15_000);
       if (!appeared) throw new Error("ChatGPT 没有显示原生附件预览，本次未登记为上传成功");
+      await recordWorkbenchQuota(entry, "uploaded", files.filter((file) => /^image\//i.test(file.type || "")).length);
       fillComposer(instruction(entry));
-      let workflowResult = null;
       if (entry.autoRun) {
         reportWorkbenchProgress(task, "附件上传完成", 12, `${files.length} 个文件已进入 GPT`);
         workflowResult = await runAutomaticProduction(task);
       }
+      }
       task.status = "success";
       task.completed = task.total;
-      const workflowDetail = workflowResult?.plannedOnly
+      const workflowDetail = workflowResult?.templateInitialized
+        ? "当前会话的模板环境已初始化"
+        : workflowResult?.plannedOnly
         ? "迁移计划已生成，等待人工确认"
         : workflowResult?.packageSkipped
           ? `已下载 ${workflowResult.downloadedImages || 0} 张图并复制文案`
@@ -1226,7 +1422,14 @@
             : workflowResult?.packageResult?.packagePath
               ? `作品已核对并保存到 ${workflowResult.packageResult.packagePath}`
               : `${files.length} 个文件已上传`;
-      reportWorkbenchTask(task, "success", workflowDetail);
+      reportWorkbenchTask(task, "success", workflowDetail, {
+        taskType: entry.taskType || "material",
+        downloadedImages: Number(workflowResult?.downloadedImages || 0),
+        batchId: workflowResult?.batchId || "",
+        packagePath: workflowResult?.packageResult?.packagePath || "",
+        archivePath: workflowResult?.archiveResult?.to || "",
+        conversationUrl: workflowResult?.conversationUrl || location.href
+      });
       if (entry.entryKind === "material") {
         state.pendingUsage = entry;
         await recordMaterialUsage(entry, "prepared").catch(() => null);
@@ -1244,7 +1447,10 @@
         setStatus(`已取消：${entry.name}`);
       } else {
         task.status = "failed";
-        reportWorkbenchTask(task, "failed", error.message || "upload failed");
+        reportWorkbenchTask(task, "failed", error.message || "upload failed", {
+          stage: task.lastStage || "",
+          percent: Number(task.lastPercent || 0)
+        });
         task.error = error.message || "未知错误";
         setStatus(task.error, "danger");
       }
@@ -1753,7 +1959,9 @@
       ? [...new Set(message.attachments.map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 30)
       : [];
     const prompt = String(message.prompt || "").trim().slice(0, 30000);
-    if (!requestId || !attachments.length || !prompt) {
+    const retryFromStage = String(message.retryFromStage || "").trim();
+    const resumeOnly = Boolean(retryFromStage);
+    if (!requestId || (!resumeOnly && (!attachments.length || !prompt))) {
       window.postMessage({
         source: "tb-gpt-production-extension",
         type: "tb-workbench-task-result",
@@ -1761,6 +1969,22 @@
         status: "failed",
         detail: "missing requestId, attachments or prompt"
       }, "*");
+      return;
+    }
+    const retryOf = String(message.retryOf || "").trim();
+    const retryTask = retryOf
+      ? state.uploadTasks.find((item) => item.entry?.externalRequestId === retryOf && item.status === "failed")
+      : null;
+    if (retryTask) {
+      retryTask.entry.externalRequestId = requestId;
+      retryTask.entry.autoOptions = message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : retryTask.entry.autoOptions;
+      retryTask.entry.retryFromStage = String(message.retryFromStage || "");
+      retryTask.entry.retryFromPercent = Number(message.retryFromPercent || 0);
+      retryTask.status = "queued";
+      retryTask.error = "";
+      retryTask.controller = new AbortController();
+      renderQueue();
+      processUploadQueue();
       return;
     }
     uploadEntry({
@@ -1772,8 +1996,14 @@
       entryKind: "external",
       customPrompt: prompt,
       externalRequestId: requestId,
+      accountId: String(message.accountId || ""),
+      taskType: String(message.taskType || "material"),
+      templateId: String(message.templateId || ""),
+      materialPath: String(message.materialPath || ""),
       autoRun: Boolean(message.autoRun),
-      autoOptions: message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {}
+      autoOptions: message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {},
+      retryFromStage,
+      retryFromPercent: Number(message.retryFromPercent || 0)
     });
   }
 
