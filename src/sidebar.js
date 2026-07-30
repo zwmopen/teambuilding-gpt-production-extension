@@ -1,8 +1,11 @@
 (() => {
-  const API_ROOT = "http://127.0.0.1:4327";
+  document.documentElement.dataset.tbGptProductionExtension = "ready";
+  const DEFAULT_API_ROOT = "http://127.0.0.1:4327";
   const ROOT_ID = "tb-gpt-production-studio";
   const LAUNCHER_ID = "tb-gpt-production-launcher";
   const DROP_OVERLAY_ID = "tb-gpt-production-drop-overlay";
+  const EMBEDDED_STORAGE_KEY = "tb-workbench-embedded";
+  const API_ROOT_STORAGE_KEY = "tb-workbench-api-root";
   const PATH_STORAGE_KEY = "tb-production-paths";
   const ACTION_STORAGE_KEY = "tb-material-action-settings";
   const SEASON_TAGS = Object.freeze({
@@ -72,14 +75,52 @@
   let materialIndexTimer = null;
   localStorage.removeItem("tb-studio-collapsed");
 
+  function isEmbeddedWorkbench() {
+    return localStorage.getItem(EMBEDDED_STORAGE_KEY) === "1"
+      || /TeambuildingWorkbenchGPT/i.test(navigator.userAgent || "");
+  }
+
+  function currentApiRoot() {
+    const candidate = String(localStorage.getItem(API_ROOT_STORAGE_KEY) || "").trim();
+    return /^http:\/\/127\.0\.0\.1:\d+$/.test(candidate) ? candidate : DEFAULT_API_ROOT;
+  }
+
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[char]));
   const fileName = (filePath) => String(filePath || "").split(/[\\/]/).pop() || "本地文件";
 
+  function bufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = "";
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  }
+
+  async function directLocalRequest(pathname, options = {}, responseType = "json", signal = null) {
+    const response = await fetch(new URL(pathname, currentApiRoot()).href, {
+      method: options.method || "GET",
+      headers: options.body ? { "Content-Type": "application/json" } : undefined,
+      body: options.body,
+      signal
+    });
+    if (!response.ok) throw new Error(await response.text().catch(() => `HTTP ${response.status}`));
+    const contentType = response.headers.get("content-type") || "";
+    if (responseType === "base64") return { ok: true, contentType, data: bufferToBase64(await response.arrayBuffer()) };
+    if (responseType === "text") return { ok: true, contentType, data: await response.text() };
+    return { ok: true, contentType, data: await response.json() };
+  }
+
   async function api(pathname, options = {}) {
+    if (isEmbeddedWorkbench()) {
+      const result = await directLocalRequest(pathname, options);
+      return result.data;
+    }
     const result = await chrome.runtime.sendMessage({
       type: "tb-local-request",
+      baseUrl: currentApiRoot(),
       path: pathname,
       method: options.method || "GET",
       body: options.body ? JSON.parse(options.body) : undefined
@@ -89,9 +130,13 @@
   }
 
   async function readLocalFile(filePath, responseType = "base64", signal = null) {
+    if (isEmbeddedWorkbench()) {
+      return directLocalRequest(`/file?path=${encodeURIComponent(filePath)}`, {}, responseType, signal);
+    }
     if (signal?.aborted) throw new DOMException("上传已取消", "AbortError");
     const request = chrome.runtime.sendMessage({
       type: "tb-local-request",
+      baseUrl: currentApiRoot(),
       path: `/file?path=${encodeURIComponent(filePath)}`,
       responseType
     });
@@ -666,8 +711,16 @@
   }
 
   async function findFileInput() {
-    return document.querySelector('#upload-files:not(:disabled)')
+    const locate = () => document.querySelector('#upload-files:not(:disabled)')
       || document.querySelector('input[data-testid="upload-files-input"]:not(:disabled)');
+    const existing = locate();
+    if (existing) return existing;
+    const attachmentButton = [...document.querySelectorAll("button")].find((button) => {
+      const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""}`;
+      return /attach|add (?:photos|files)|upload|附件|添加文件|上传/i.test(label) && !button.disabled;
+    });
+    attachmentButton?.click();
+    return waitFor(locate, 2500);
   }
 
   function attachmentPreviewCount() {
@@ -703,6 +756,7 @@
   }
 
   function instruction(entry) {
+    if (entry.customPrompt) return String(entry.customPrompt);
     return [
       "请按当前对话已经确定的母版和网页脚本处理这份团建内容。",
       `本地文件夹：${entry.path}`,
@@ -787,6 +841,29 @@
     }, 700);
   }
 
+  function reportWorkbenchTask(task, status, detail = "") {
+    const requestId = task?.entry?.externalRequestId;
+    if (!requestId) return;
+    document.documentElement.dataset.tbGptLastTask = `${requestId}:${status}`;
+    const result = {
+      source: "tb-gpt-production-extension",
+      type: "tb-workbench-task-result",
+      requestId,
+      status,
+      detail: String(detail || "")
+    };
+    let bridge = document.getElementById("tb-workbench-bridge-result");
+    if (!bridge) {
+      bridge = document.createElement("script");
+      bridge.id = "tb-workbench-bridge-result";
+      bridge.type = "application/json";
+      document.documentElement.appendChild(bridge);
+    }
+    bridge.textContent = JSON.stringify(result);
+    document.dispatchEvent(new Event("tb-workbench-task-result"));
+    window.postMessage(result, "*");
+  }
+
   function uploadEntry(entry) {
     if (!entry) return;
     const duplicate = state.uploadTasks.find((task) =>
@@ -863,6 +940,7 @@
       fillComposer(instruction(entry));
       task.status = "success";
       task.completed = task.total;
+      reportWorkbenchTask(task, "success", `${files.length} files attached`);
       if (entry.entryKind === "material") {
         state.pendingUsage = entry;
         await recordMaterialUsage(entry, "prepared").catch(() => null);
@@ -876,9 +954,11 @@
       if (error?.name === "AbortError") {
         task.status = "cancelled";
         task.error = "";
+        reportWorkbenchTask(task, "cancelled");
         setStatus(`已取消：${entry.name}`);
       } else {
         task.status = "failed";
+        reportWorkbenchTask(task, "failed", error.message || "upload failed");
         task.error = error.message || "未知错误";
         setStatus(task.error, "danger");
       }
@@ -1378,21 +1458,69 @@
     if (event.target.matches?.("textarea, [contenteditable='true']")) commitPendingMaterialUsage();
   }, true);
 
+  function acceptWorkbenchTask(message) {
+    if (message?.source !== "teambuilding-workbench"
+      || message?.type !== "tb-workbench-upload") return;
+    const requestId = String(message.requestId || "").trim();
+    document.documentElement.dataset.tbGptLastTask = `${requestId || "missing"}:received`;
+    const attachments = Array.isArray(message.attachments)
+      ? [...new Set(message.attachments.map((item) => String(item || "").trim()).filter(Boolean))].slice(0, 30)
+      : [];
+    const prompt = String(message.prompt || "").trim().slice(0, 30000);
+    if (!requestId || !attachments.length || !prompt) {
+      window.postMessage({
+        source: "tb-gpt-production-extension",
+        type: "tb-workbench-task-result",
+        requestId,
+        status: "failed",
+        detail: "missing requestId, attachments or prompt"
+      }, "*");
+      return;
+    }
+    uploadEntry({
+      id: `workbench-${requestId}`,
+      name: String(message.name || "工作台素材").slice(0, 160),
+      path: String(message.materialPath || message.name || "工作台素材"),
+      attachments,
+      imageCount: attachments.filter((filePath) => /\.(?:png|jpe?g|webp|gif|bmp)$/i.test(filePath)).length,
+      entryKind: "external",
+      customPrompt: prompt,
+      externalRequestId: requestId
+    });
+  }
+
+  window.addEventListener("message", (event) => {
+    acceptWorkbenchTask(event.data);
+  });
+
+  document.addEventListener("tb-workbench-upload", () => {
+    try {
+      const bridge = document.getElementById("tb-workbench-bridge-request");
+      acceptWorkbenchTask(JSON.parse(bridge?.textContent || "{}"));
+    } catch (error) {
+      document.documentElement.dataset.tbGptLastTask = `bridge:failed:${error.message}`;
+    }
+  });
+
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== "tb-sidebar-toggle") return;
     state.collapsed = !state.collapsed;
     applyLayout();
   });
 
-  render();
+  if (!isEmbeddedWorkbench()) render();
   Promise.all([readStoredPaths(), readActionSettings()]).then(([paths, actionSettings]) => {
     state.actionSettings = actionSettings;
     storePaths(paths);
-    renderBody();
-    return refresh();
+    if (!isEmbeddedWorkbench()) {
+      renderBody();
+      return refresh();
+    }
+    return null;
   });
 
   const mountObserver = new MutationObserver(() => {
+    if (isEmbeddedWorkbench()) return;
     if (document.getElementById(ROOT_ID) && document.getElementById(LAUNCHER_ID)) return;
     if (remountQueued) return;
     remountQueued = true;

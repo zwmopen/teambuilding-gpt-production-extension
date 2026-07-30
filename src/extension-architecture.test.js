@@ -11,11 +11,24 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(scripts.includes("vendor/chatgpt-conversation-tree.user.js"));
   assert.ok(scripts.includes("sidebar.js"));
   assert.ok(scripts.indexOf("vendor/chatgpt-conversation-tree.user.js") < scripts.indexOf("sidebar.js"));
-  assert.ok(manifest.host_permissions.includes("http://127.0.0.1:4327/*"));
+  assert.ok(manifest.host_permissions.includes("http://127.0.0.1/*"));
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.2");
+  assert.equal(manifest.version, "0.2.3");
+});
+
+test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  assert.match(source, /tb-workbench-embedded/);
+  assert.match(source, /TeambuildingWorkbenchGPT/);
+  assert.match(source, /tb-workbench-upload/);
+  assert.match(source, /tb-workbench-task-result/);
+  assert.match(source, /customPrompt/);
+  assert.match(source, /if \(!isEmbeddedWorkbench\(\)\) render\(\)/);
+  assert.match(background, /allowedLocalRoot/);
+  assert.match(background, /127\\\.0\\\.0\\\.1/);
 });
 
 test("右侧生产舱同时声明成品、素材、路径设置和附件上传入口", () => {

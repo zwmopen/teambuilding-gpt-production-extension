@@ -7,6 +7,11 @@ const pendingByDownloadId = new Map();
 const downloadIdByRequestId = new Map();
 const LOCAL_ROOT = "http://127.0.0.1:4327";
 
+function allowedLocalRoot(value) {
+  const candidate = String(value || "").trim();
+  return /^http:\/\/127\.0\.0\.1:\d+$/.test(candidate) ? candidate : LOCAL_ROOT;
+}
+
 function bytesToBase64(buffer) {
   const bytes = new Uint8Array(buffer);
   let binary = "";
@@ -17,8 +22,9 @@ function bytesToBase64(buffer) {
 }
 
 async function localRequest(message) {
-  const target = new URL(message.path, LOCAL_ROOT);
-  if (target.origin !== LOCAL_ROOT) throw new Error("local request target rejected");
+  const localRoot = allowedLocalRoot(message.baseUrl);
+  const target = new URL(message.path, localRoot);
+  if (target.origin !== localRoot) throw new Error("local request target rejected");
   const response = await fetch(target.href, {
     method: message.method || "GET",
     headers: message.body === undefined ? undefined : { "Content-Type": "application/json" },
@@ -49,7 +55,7 @@ async function notifyDownload(task, payload) {
 
 async function recordCompletedDownload(item, task) {
   if (!item?.filename) return;
-  await fetch("http://127.0.0.1:4327/api/extension/download-event", {
+  await fetch(`${allowedLocalRoot(task?.baseUrl)}/api/extension/download-event`, {
     method: "POST",
     headers: { "Content-Type": "application/json" },
     body: JSON.stringify({
@@ -101,7 +107,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     localRequest({
       path: "/api/extension/work-package",
       method: "POST",
-      body: message.body || {}
+      body: message.body || {},
+      baseUrl: message.baseUrl
     }).then(
       (result) => sendResponse(result),
       (error) => sendResponse({ ok: false, error: error.message })
@@ -138,7 +145,8 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
           requestId: message.requestId,
           filename: message.filename || "",
           tabId: _sender.tab?.id,
-          pageUrl: _sender.tab?.url || ""
+          pageUrl: _sender.tab?.url || "",
+          baseUrl: message.baseUrl
         };
         pendingByDownloadId.set(id, task);
         downloadIdByRequestId.set(task.requestId, id);

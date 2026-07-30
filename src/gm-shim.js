@@ -39,6 +39,9 @@
     downloadCallbacks.set(requestId, normalized);
     chrome.runtime.sendMessage({
       type: "tb-download",
+      baseUrl: /^http:\/\/127\.0\.0\.1:\d+$/.test(localStorage.getItem("tb-workbench-api-root") || "")
+        ? localStorage.getItem("tb-workbench-api-root")
+        : undefined,
       requestId,
       url: normalized.url,
       filename: normalized.name

@@ -5924,6 +5924,9 @@
       const clipboardText = await navigator.clipboard.readText();
       const response = await chrome.runtime.sendMessage({
         type: 'tb-work-package',
+        baseUrl: /^http:\/\/127\.0\.0\.1:\d+$/.test(localStorage.getItem('tb-workbench-api-root') || '')
+          ? localStorage.getItem('tb-workbench-api-root')
+          : undefined,
         body: {
           clipboardText,
           title: currentWorkPackageConversationTitle(),
