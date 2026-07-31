@@ -1212,37 +1212,57 @@
     if (!workflow.imageSubmitted) {
       workflow.beforeImagesCount = assistantTurns().length;
       reportWorkbenchProgress(task, "确认出图", 36, "迁移计划已完成，自动发送 1");
-      fillComposer("1");
+      fillComposer(String(options.confirmText || "1").trim() || "1");
       workflow.imageSubmitted = true;
       await submitComposer();
     } else if (!workflow.downloadResult) {
       reportWorkbenchProgress(task, "继续等待生成图片", 48, "已恢复当前网页中的图片生成，不重复发送 1");
     }
+    let imageTurns = null;
     if (!workflow.downloadResult) {
       const imageResult = await waitForAssistantCompletion(workflow.beforeImagesCount, {
         timeout: taskTimeout,
         needImages: true
       });
-      workflow.downloadResult = await downloadFreshImages(imageResult.turns, task);
+      imageTurns = imageResult.turns;
     }
-    const downloadResult = workflow.downloadResult;
-    const downloadedImages = downloadResult.count;
-    if (!downloadedImages) throw new Error("图片下载数量为 0，未执行打包");
-    await recordWorkbenchQuota(task.entry, "generated", downloadedImages);
+    const downloadPromise = workflow.downloadResult
+      ? Promise.resolve(workflow.downloadResult)
+      : downloadFreshImages(imageTurns, task);
     if (options.autoCopy === false) {
+      workflow.downloadResult = await downloadPromise;
+      const downloadedImages = workflow.downloadResult.count;
+      if (!downloadedImages) throw new Error("图片下载数量为 0，未执行打包");
+      const requiredImages = Math.max(0, Number(task.entry.expectedImages || 0))
+        || Math.max(1, Number(options.minimumImageCount || 4));
+      if (downloadedImages < requiredImages) {
+        throw new Error(`生成图片不完整：实际 ${downloadedImages} 张，至少需要 ${requiredImages} 张；疑似额度不足或生成中断，未执行打包`);
+      }
+      await recordWorkbenchQuota(task.entry, "generated", downloadedImages);
       reportWorkbenchProgress(task, "完成", 100, `已下载 ${downloadedImages} 张图；自动文案已关闭`);
-      return { downloadedImages, textSkipped: true, batchId: downloadResult.batchId, conversationUrl: location.href };
+      return { downloadedImages, textSkipped: true, batchId: workflow.downloadResult.batchId, conversationUrl: location.href };
     }
 
     if (!workflow.textSubmitted) {
       workflow.beforeTextCount = assistantTurns().length;
-      reportWorkbenchProgress(task, "生成小红书文案", 78, "图片已下载，正在请求本帖文案");
-      fillComposer("给我一份小红书文案");
+      reportWorkbenchProgress(task, "生成小红书文案", 72, "图片已完成，正在并行下载图片并请求本帖文案");
+      fillComposer(String(options.copyPrompt || "给我一份小红书文案").trim() || "给我一份小红书文案");
       workflow.textSubmitted = true;
       await submitComposer();
     } else if (!workflow.copyText) {
       reportWorkbenchProgress(task, "继续等待小红书文案", 84, "已恢复当前网页中的文案生成，不重复发送请求");
     }
+    workflow.downloadResult = await downloadPromise;
+    const downloadResult = workflow.downloadResult;
+    const downloadedImages = downloadResult.count;
+    if (!downloadedImages) throw new Error("图片下载数量为 0，未执行打包");
+    const expectedImages = Math.max(0, Number(task.entry.expectedImages || 0));
+    const minimumImages = Math.max(1, Number(options.minimumImageCount || 4));
+    const requiredImages = expectedImages || minimumImages;
+    if (downloadedImages < requiredImages) {
+      throw new Error(`生成图片不完整：实际 ${downloadedImages} 张，至少需要 ${requiredImages} 张；疑似额度不足或生成中断，未执行打包`);
+    }
+    await recordWorkbenchQuota(task.entry, "generated", downloadedImages);
     if (!workflow.copyText) {
       let textResult = await waitForAssistantCompletion(workflow.beforeTextCount, {
         timeout: 8 * 60_000,
@@ -1283,7 +1303,9 @@
           conversationUrl: location.href,
           accountName: localStorage.getItem("tb-workbench-account-id") || "",
           batchId: downloadResult.batchId,
-          expectedImageCount: downloadedImages
+          expectedImageCount: downloadedImages,
+          downloadRoot: String(options.downloadRoot || "").trim(),
+          productRoot: String(options.productRoot || "").trim()
         })
       });
     if (!packageResult?.ok) throw new Error(packageResult?.error || "本地打包没有返回成功");
@@ -1960,6 +1982,10 @@
       : [];
     const prompt = String(message.prompt || "").trim().slice(0, 30000);
     const retryFromStage = String(message.retryFromStage || "").trim();
+    const taskOptions = message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {};
+    localStorage.setItem("tb-workbench-prompt-library-enabled", taskOptions.promptLibraryEnabled === false ? "0" : "1");
+    localStorage.setItem("tb-workbench-message-downloads-enabled", taskOptions.messageDownloadsEnabled === false ? "0" : "1");
+    window.dispatchEvent(new CustomEvent("tb-workbench-tools-visibility"));
     const resumeOnly = Boolean(retryFromStage);
     if (!requestId || (!resumeOnly && (!attachments.length || !prompt))) {
       window.postMessage({
@@ -1977,7 +2003,7 @@
       : null;
     if (retryTask) {
       retryTask.entry.externalRequestId = requestId;
-      retryTask.entry.autoOptions = message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : retryTask.entry.autoOptions;
+      retryTask.entry.autoOptions = taskOptions;
       retryTask.entry.retryFromStage = String(message.retryFromStage || "");
       retryTask.entry.retryFromPercent = Number(message.retryFromPercent || 0);
       retryTask.status = "queued";
@@ -1996,12 +2022,13 @@
       entryKind: "external",
       customPrompt: prompt,
       externalRequestId: requestId,
-      accountId: String(message.accountId || ""),
+      accountId: String(message.quotaAccountId || message.accountId || ""),
       taskType: String(message.taskType || "material"),
       templateId: String(message.templateId || ""),
       materialPath: String(message.materialPath || ""),
       autoRun: Boolean(message.autoRun),
-      autoOptions: message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {},
+      autoOptions: taskOptions,
+      expectedImages: Math.max(0, Number(message.expectedImages || 0)),
       retryFromStage,
       retryFromPercent: Number(message.retryFromPercent || 0)
     });

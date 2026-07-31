@@ -1,4 +1,4 @@
-chrome.action.onClicked.addListener(async (tab) => {
+chrome.action?.onClicked?.addListener(async (tab) => {
   if (!tab.id) return;
   await chrome.tabs.sendMessage(tab.id, { type: "tb-sidebar-toggle" }).catch(() => {});
 });
@@ -71,7 +71,7 @@ async function recordCompletedDownload(item, task) {
   }).catch(() => {});
 }
 
-chrome.downloads.onChanged.addListener(async (delta) => {
+chrome.downloads?.onChanged?.addListener(async (delta) => {
   const task = pendingByDownloadId.get(delta.id);
   if (!task) return;
   if (delta.bytesReceived) {
@@ -123,6 +123,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "tb-download-cancel") {
+    if (!chrome.downloads?.cancel) {
+      sendResponse({ ok: false, error: "当前内置浏览器不提供下载管理接口" });
+      return false;
+    }
     const id = downloadIdByRequestId.get(message.requestId);
     if (!id) {
       sendResponse({ ok: false, error: "download not found" });
@@ -135,6 +139,10 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true;
   }
   if (message?.type === "tb-download") {
+    if (!chrome.downloads?.download) {
+      sendResponse({ ok: false, error: "当前内置浏览器不提供下载管理接口" });
+      return false;
+    }
     chrome.downloads.download({
       url: message.url,
       filename: message.filename || undefined,

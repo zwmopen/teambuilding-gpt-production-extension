@@ -25,7 +25,7 @@
   'use strict';
 
   const APP_ID = 'cgpt-conversation-tree';
-  const SCRIPT_VERSION = '1.12.3';
+  const SCRIPT_VERSION = '1.12.4';
   const HEADER_ID = `${APP_ID}-header-actions`;
   const MENU_ID = `${APP_ID}-menu`;
   const STYLE_ID = `${APP_ID}-style`;
@@ -73,6 +73,14 @@
   // ChatGPT 会频繁替换左侧历史列表。搬动其原生 React 节点会导致会话点击卡住，
   // 因此扩展版只保留下载、提示词和工作包能力，原生左侧会话由 ChatGPT 自己管理。
   const ENABLE_CONVERSATION_TREE = false;
+
+  function promptLibraryEnabled() {
+    return localStorage.getItem('tb-workbench-prompt-library-enabled') !== '0';
+  }
+
+  function messageDownloadToolsEnabled() {
+    return localStorage.getItem('tb-workbench-message-downloads-enabled') !== '0';
+  }
 
   const icons = {
     chevron: (open) => open
@@ -1283,8 +1291,8 @@
         align-self: center;
         height: auto;
         min-height: 0;
-        min-width: 0;
-        padding: 0 4px;
+        min-width: 58px;
+        padding: 0 8px;
         display: inline-flex;
         align-items: center;
         justify-content: center;
@@ -1300,6 +1308,8 @@
         cursor: pointer;
         white-space: nowrap;
         box-sizing: border-box;
+        position: relative;
+        z-index: 2;
       }
       #${PROMPT_BUTTON_ID}:hover,
       #${PROMPT_BUTTON_ID}[aria-expanded="true"] {
@@ -1363,6 +1373,11 @@
       #${PROMPT_PANEL_ID} button:disabled {
         opacity: .55;
         cursor: progress;
+      }
+      #${PROMPT_PANEL_ID} .cgpt-prompt-list {
+        min-height: 0;
+        overflow: auto;
+        overscroll-behavior: contain;
       }
       #${PROMPT_PANEL_ID} .cgpt-prompt-primary {
         background: var(--sidebar-surface-secondary, rgba(0,0,0,.08));
@@ -1914,6 +1929,13 @@
         white-space: nowrap;
         font-size: 12px;
         font-weight: 600;
+      }
+      .${WORK_PACKAGE_CLASS}:not(.cgpt-work-package-called):not(.cgpt-work-package-done) .cgpt-work-package-label {
+        font-size: 0;
+      }
+      .${WORK_PACKAGE_CLASS}:not(.cgpt-work-package-called):not(.cgpt-work-package-done) .cgpt-work-package-label::after {
+        content: '\u4e0b\u8f7d\u5e76\u6253\u5305';
+        font-size: 12px;
       }
       #${IMAGE_DOWNLOAD_TOAST_ID} {
         position: fixed;
@@ -2583,6 +2605,11 @@
   }
 
   function ensurePromptButton() {
+    if (!promptLibraryEnabled()) {
+      document.getElementById(PROMPT_BUTTON_ID)?.remove();
+      closePromptPanel();
+      return false;
+    }
     const input = promptComposerInput();
     if (!input) return false;
     const composer = composerRootFor(input);
@@ -2644,10 +2671,18 @@
     const anchor = button || panel?.__cgptPromptAnchor || document.getElementById(PROMPT_BUTTON_ID);
     if (!panel || panel.hidden || !anchor?.isConnected) return;
     const rect = anchor.getBoundingClientRect();
-    const availableAbove = Math.max(220, rect.top - 12);
-    panel.style.top = 'auto';
-    panel.style.maxHeight = `${Math.min(620, availableAbove)}px`;
-    panel.style.bottom = `${Math.max(8, innerHeight - rect.top + 8)}px`;
+    const gap = 8;
+    const availableAbove = Math.max(0, rect.top - gap * 2);
+    const availableBelow = Math.max(0, innerHeight - rect.bottom - gap * 2);
+    const useAbove = availableAbove >= 260 || availableAbove >= availableBelow;
+    panel.style.maxHeight = `${Math.min(620, Math.max(220, useAbove ? availableAbove : availableBelow))}px`;
+    if (useAbove) {
+      panel.style.top = 'auto';
+      panel.style.bottom = `${Math.max(8, innerHeight - rect.top + gap)}px`;
+    } else {
+      panel.style.bottom = 'auto';
+      panel.style.top = `${Math.max(8, rect.bottom + gap)}px`;
+    }
     const width = panel.offsetWidth || 420;
     panel.style.left = `${Math.max(8, Math.min(innerWidth - width - 8, rect.left + rect.width - width))}px`;
   }
@@ -5840,6 +5875,10 @@
 
   function refreshTextDownloadButtons() {
     const main = document.querySelector('main') || document.body;
+    if (!messageDownloadToolsEnabled()) {
+      main.querySelectorAll(`.${TEXT_DOWNLOAD_SLOT_CLASS}, .${IMAGE_DOWNLOAD_SLOT_CLASS}`).forEach((node) => node.remove());
+      return;
+    }
     [...main.querySelectorAll(`.${TEXT_DOWNLOAD_SLOT_CLASS}`)].forEach((slot) => {
       const copyButton = slot.previousElementSibling;
       const card = copyButton ? textCardForCopyButton(copyButton) : null;
@@ -5908,7 +5947,7 @@
       button.setAttribute('aria-label', '打包完成');
       return;
     }
-    button.innerHTML = icons.package;
+    button.innerHTML = `${icons.package}<span class="cgpt-work-package-label">下载并打包本组成品</span>`;
     button.title = '打包作品：整理已下载图片和剪贴板文案';
     button.setAttribute('aria-label', '打包作品');
   }
@@ -5919,8 +5958,14 @@
     event?.stopPropagation?.();
     event?.stopImmediatePropagation?.();
     setWorkPackageButtonState(button, 'running');
-    showImageDownloadToast('打包中...', true);
+    showImageDownloadToast('正在下载并核对本组图片...', true);
     try {
+      const imageButton = button.__cgptImageDownloadButton;
+      if (!imageButton) throw new Error('没有找到当前回复对应的图片下载按钮');
+      const downloadResult = await runImageDownloadShortcut(imageButton);
+      if (!downloadResult?.batchId || downloadResult.downloaded !== downloadResult.total) {
+        throw new Error(`本组图片未完整下载：${downloadResult?.downloaded || 0}/${downloadResult?.total || 0}`);
+      }
       const clipboardText = await navigator.clipboard.readText();
       const response = await chrome.runtime.sendMessage({
         type: 'tb-work-package',
@@ -5932,6 +5977,8 @@
           title: currentWorkPackageConversationTitle(),
           conversationUrl: currentWorkPackageConversationUrl(),
           accountName: currentWorkPackageAccountName(),
+          batchId: downloadResult.batchId,
+          expectedImageCount: downloadResult.total,
         },
       });
       if (!response?.ok) {
@@ -5958,6 +6005,10 @@
   }
 
   function ensureImageDownloadButton(container, images, preferredActionRow = null) {
+    if (!messageDownloadToolsEnabled()) {
+      container.querySelector(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`)?.remove();
+      return;
+    }
     container.setAttribute('data-cgpt-image-download-container', 'true');
     let slot = container.querySelector(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`);
     if (preferredActionRow && slot && slot.parentElement !== preferredActionRow) {
@@ -6000,6 +6051,7 @@
         slot.append(packageButton);
       }
       packageButton.onclick = (event) => triggerWorkPackageButton(packageButton, event);
+      packageButton.__cgptImageDownloadButton = button;
     } else if (packageButton) {
       packageButton.remove();
     }
@@ -6027,7 +6079,7 @@
       const statusText = imageButtonStatusText(done ? 'done' : 'idle');
       const status = `<span class="cgpt-image-download-status" data-cgpt-image-download-status${statusText ? '' : ' hidden'}>${escapeHtml(statusText)}</span>`;
       const badge = `<span class="cgpt-image-download-count" data-cgpt-image-download-label${countText ? '' : ' hidden'}>${escapeHtml(countText)}</span>`;
-      button.innerHTML = `${icons.download}${status}${badge}`;
+      button.innerHTML = `${icons.download}<span class="cgpt-image-download-label">\u4e0b\u8f7d\u672c\u7ec4</span>${status}${badge}`;
       button.classList.toggle('cgpt-image-download-done', done);
       if (downloaded) setImageButtonProgress(button, downloaded, totalCount, false);
     }
@@ -6163,7 +6215,7 @@
     return src;
   }
 
-  function directDownloadName(index, url) {
+  function directDownloadName(index, url, batchId = '', total = 0) {
     let ext = 'jpg';
     try {
       const pathname = new URL(url, location.href).pathname;
@@ -6171,6 +6223,9 @@
       if (match?.[1] && !/html?|aspx?|php/i.test(match[1])) ext = match[1].toLowerCase();
     } catch {
       // keep default
+    }
+    if (batchId && total > 0) {
+      return `chatgpt-workpkg-${batchId}-${String(index + 1).padStart(2, '0')}-of-${String(total).padStart(2, '0')}.${ext}`;
     }
     const stamp = new Date().toISOString().replace(/[-:]/g, '').replace(/\..+/, '').replace('T', '-');
     return `chatgpt-image-group-${stamp}-${String(index + 1).padStart(2, '0')}.${ext}`;
@@ -6213,7 +6268,7 @@
     });
   }
 
-  async function downloadUrlsConcurrently(urls, onProgress = null, concurrency = 4) {
+  async function downloadUrlsConcurrently(urls, onProgress = null, concurrency = 4, batchId = '') {
     const total = urls.length;
     const limit = Math.max(1, Math.min(8, Number(concurrency || 4), total || 1));
     let nextIndex = 0;
@@ -6222,7 +6277,7 @@
       while (nextIndex < total) {
         const index = nextIndex;
         nextIndex += 1;
-        const success = await gmDownload(urls[index], directDownloadName(index, urls[index]));
+        const success = await gmDownload(urls[index], directDownloadName(index, urls[index], batchId, total));
         if (success) ok += 1;
         if (onProgress) {
           try { onProgress(ok, total); } catch {}
@@ -6330,7 +6385,7 @@
     }, delay);
   }
 
-  async function directDownloadImages(images, onProgress = null) {
+  async function directDownloadImages(images, onProgress = null, batchId = '') {
     const urls = [];
     const seen = new Set();
     images.forEach((img) => {
@@ -6344,11 +6399,11 @@
     if (onProgress) {
       try { onProgress(0, usableUrls.length); } catch {}
     }
-    return downloadUrlsConcurrently(usableUrls, onProgress, 4);
+    return downloadUrlsConcurrently(usableUrls, onProgress, 4, batchId);
   }
 
   async function runImageDownloadShortcut(button) {
-    if (button.disabled) return;
+    if (button.disabled) return null;
     const container = button.__cgptImageDownloadContainer
       || button.closest('[data-cgpt-image-download-container]')
       || document;
@@ -6361,13 +6416,16 @@
     }
     if (!images.length) {
       window.alert('\u8fd9\u4e2a\u56de\u590d\u91cc\u6682\u65f6\u6ca1\u6709\u627e\u5230\u53ef\u4e0b\u8f7d\u7684\u56fe\u7247\u3002');
-      return;
+      return null;
     }
 
     const label = button.querySelector('[data-cgpt-image-download-label]');
     let totalImages = Number(button.dataset.cgptImageTotal || 0)
       || uniqueImageUrls(images).length
       || images.length;
+    const batchId = button.dataset.cgptWorkPackageBatch
+      || `${new Date().toISOString().replace(/\D/g, '').slice(0, 8)}-${new Date().toTimeString().replace(/\D/g, '').slice(0, 6)}-${Math.random().toString(36).slice(2, 6)}`;
+    button.dataset.cgptWorkPackageBatch = batchId;
     button.disabled = true;
     setImageButtonProgress(button, 0, totalImages, true);
 
@@ -6380,7 +6438,7 @@
       downloaded = await directDownloadImages(images, (current, total) => {
         totalImages = total || totalImages;
         setImageButtonProgress(button, current, totalImages, true);
-      });
+      }, batchId);
       if (!downloaded) {
         window.alert('\u4e0b\u8f7d\u5931\u8d25\u4e86\uff0c\u53ef\u80fd\u662f\u7f51\u7edc\u95ee\u9898\u6216\u8005\u56fe\u7247\u5730\u5740\u53d8\u4e86\u3002\u6253\u5f00\u63a7\u5236\u53f0\u53ef\u4ee5\u770b\u5230\u8be6\u7ec6\u65e5\u5fd7\u3002');
       } else if (totalImages && downloaded >= totalImages) {
@@ -6397,6 +6455,7 @@
         setImageButtonProgress(button, downloaded, totalImages, false, downloaded ? 'done' : 'idle');
       }, 600);
     }
+    return { batchId, downloaded, total: totalImages };
   }
 
   function handleAction(actionElement) {
@@ -6935,6 +6994,10 @@
   bindImageDownloadEvents();
   installImageDownloadDebugApi();
   addDiagnosticLog('script:init');
+  window.addEventListener('tb-workbench-tools-visibility', () => {
+    ensurePromptButton();
+    scheduleImageDownloadButtons();
+  });
   scanNativeChats();
   ensurePromptButton();
   scheduleCloudPromptSync();

@@ -1,6 +1,6 @@
 {
   "name": "teambuilding-gpt-production-extension",
-  "version": "0.2.11",
+  "version": "0.2.12",
   "private": true,
   "description": "寄生于真实 ChatGPT 页面的团建数字作品生产扩展",
   "scripts": {

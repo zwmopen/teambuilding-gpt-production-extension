@@ -15,7 +15,27 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.11");
+  assert.equal(manifest.version, "0.2.12");
+});
+
+test("GPT web controls stay visible and place prompt panel inside viewport", () => {
+  const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  assert.match(vendor, /availableBelow/);
+  assert.match(vendor, /min-width: 58px/);
+  assert.match(vendor, /cgpt-image-download-label/);
+});
+
+test("embedded automation can toggle prompt and download tools and rejects incomplete image sets", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  assert.match(source, /tb-workbench-prompt-library-enabled/);
+  assert.match(source, /tb-workbench-message-downloads-enabled/);
+  assert.match(source, /minimumImageCount/);
+  assert.match(source, /生成图片不完整/);
+  assert.match(source, /downloadRoot/);
+  assert.match(source, /productRoot/);
+  assert.match(vendor, /promptLibraryEnabled/);
+  assert.match(vendor, /messageDownloadToolsEnabled/);
 });
 
 test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务", () => {
