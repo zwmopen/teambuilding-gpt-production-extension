@@ -39,6 +39,7 @@
   const IMAGE_DOWNLOAD_CLASS = `${APP_ID}-image-download-all`;
   const IMAGE_DOWNLOAD_SLOT_CLASS = `${APP_ID}-image-download-slot`;
   const TEXT_DOWNLOAD_CLASS = `${APP_ID}-text-download`;
+  const TEXT_COPY_CLASS = `${APP_ID}-text-copy`;
   const TEXT_DOWNLOAD_SLOT_CLASS = `${APP_ID}-text-download-slot`;
   const WORK_PACKAGE_CLASS = `${APP_ID}-work-package`;
   const IMAGE_DOWNLOAD_TOAST_ID = `${APP_ID}-image-download-toast`;
@@ -1319,16 +1320,16 @@
       #${PROMPT_PANEL_ID} {
         position: fixed;
         z-index: 2147483647;
-        width: min(420px, calc(100vw - 24px));
-        max-height: min(620px, calc(100vh - 24px));
+        width: min(320px, calc(100vw - 20px));
+        max-height: min(420px, calc(100vh - 20px));
         display: flex;
         flex-direction: column;
-        gap: 8px;
-        padding: 10px;
+        gap: 5px;
+        padding: 7px;
         box-sizing: border-box;
         overflow: hidden;
         border: 1px solid color-mix(in srgb, currentColor 12%, transparent);
-        border-radius: 16px;
+        border-radius: 13px;
         color: var(--text-primary, inherit);
         background: var(--main-surface-primary, Canvas);
         box-shadow: 0 18px 44px rgba(0,0,0,.18);
@@ -1361,7 +1362,7 @@
       #${PROMPT_PANEL_ID} button {
         border: 0;
         border-radius: 10px;
-        padding: 7px 9px;
+        padding: 5px 7px;
         color: inherit;
         background: transparent;
         cursor: pointer;
@@ -1429,10 +1430,10 @@
       .cgpt-prompt-row {
         display: grid;
         grid-template-columns: minmax(0, 1fr) auto;
-        gap: 8px;
+        gap: 5px;
         align-items: center;
-        padding: 6px;
-        border-radius: 12px;
+        padding: 4px;
+        border-radius: 9px;
         cursor: pointer;
       }
       .cgpt-prompt-row:hover,
@@ -1471,7 +1472,7 @@
       .cgpt-prompt-preview {
         overflow: hidden;
         display: -webkit-box;
-        -webkit-line-clamp: 2;
+        -webkit-line-clamp: 1;
         -webkit-box-orient: vertical;
       }
       .cgpt-prompt-row-actions {
@@ -1482,7 +1483,7 @@
         opacity: 1;
       }
       .cgpt-prompt-row-actions button {
-        padding: 6px 8px;
+        padding: 4px 6px;
         white-space: nowrap;
       }
       .cgpt-prompt-editor {
@@ -1844,6 +1845,12 @@
         margin-inline-start: 2px;
         vertical-align: middle;
       }
+      /* Never place production actions on top of the generated picture. The
+         only visible manual entry belongs beside the reply's native ellipsis. */
+      [data-testid="image-gen-overlay-right-actions"] .${IMAGE_DOWNLOAD_SLOT_CLASS},
+      [data-testid*="image-gen-overlay"] .${IMAGE_DOWNLOAD_SLOT_CLASS} {
+        display: none !important;
+      }
       .${IMAGE_DOWNLOAD_SLOT_CLASS}.cgpt-image-download-fallback {
         display: flex;
         margin: 7px 0 2px;
@@ -1856,7 +1863,8 @@
       }
       .${IMAGE_DOWNLOAD_CLASS},
       .${WORK_PACKAGE_CLASS},
-      .${TEXT_DOWNLOAD_CLASS} {
+      .${TEXT_DOWNLOAD_CLASS},
+      .${TEXT_COPY_CLASS} {
         position: relative;
         min-width: 34px;
         height: 34px;
@@ -1876,7 +1884,8 @@
       }
       .${IMAGE_DOWNLOAD_CLASS}:hover,
       .${WORK_PACKAGE_CLASS}:hover,
-      .${TEXT_DOWNLOAD_CLASS}:hover {
+      .${TEXT_DOWNLOAD_CLASS}:hover,
+      .${TEXT_COPY_CLASS}:hover {
         background: var(--sidebar-surface-tertiary, rgba(0,0,0,.08));
       }
       .${IMAGE_DOWNLOAD_CLASS}.cgpt-image-download-done {
@@ -1901,7 +1910,8 @@
       }
       .${IMAGE_DOWNLOAD_CLASS} svg,
       .${WORK_PACKAGE_CLASS} svg,
-      .${TEXT_DOWNLOAD_CLASS} svg {
+      .${TEXT_DOWNLOAD_CLASS} svg,
+      .${TEXT_COPY_CLASS} svg {
         width: 16px;
         height: 16px;
         flex: 0 0 16px;
@@ -2675,7 +2685,7 @@
     const availableAbove = Math.max(0, rect.top - gap * 2);
     const availableBelow = Math.max(0, innerHeight - rect.bottom - gap * 2);
     const useAbove = availableAbove >= 260 || availableAbove >= availableBelow;
-    panel.style.maxHeight = `${Math.min(620, Math.max(220, useAbove ? availableAbove : availableBelow))}px`;
+    panel.style.maxHeight = `${Math.min(420, Math.max(220, useAbove ? availableAbove : availableBelow))}px`;
     if (useAbove) {
       panel.style.top = 'auto';
       panel.style.bottom = `${Math.max(8, innerHeight - rect.top + gap)}px`;
@@ -2688,6 +2698,7 @@
   }
 
   function togglePromptPanel(button) {
+    injectStyles();
     const panel = ensurePromptPanel();
     if (!panel.hidden) {
       closePromptPanel();
@@ -5448,6 +5459,12 @@
     return style.visibility !== 'hidden' && style.display !== 'none' && Number(style.opacity || 1) > 0;
   }
 
+  function isNearViewport(element, margin = Math.max(900, innerHeight * 1.5)) {
+    const rect = element?.getBoundingClientRect?.();
+    if (!rect) return false;
+    return rect.bottom >= -margin && rect.top <= innerHeight + margin;
+  }
+
   function elementText(element) {
     return compactTitle([
       element?.innerText,
@@ -5498,14 +5515,46 @@
   }
 
   function imageTurnContainer(img) {
-    return img.closest?.('[data-testid^="conversation-turn"], [data-message-author-role], article, [class*="group/conversation-turn"]')
+    return img.closest?.('[data-testid^="conversation-turn"]')
+      || img.closest?.('[data-message-author-role="assistant"], article[data-turn="assistant"], [class*="group/conversation-turn"]')
+      || img.closest?.('[id^="image-"][class*="imagegen-image"]')
       || img.closest?.('main > div > div > div')
       || img.parentElement;
   }
 
+  // Only assistant image-generation results get production download controls.
+  // User attachment previews are also large content images, but attaching
+  // "download this group / package this work" to them confuses source material
+  // with generated output and can package the wrong files.
+  function isAssistantGeneratedImage(img) {
+    if (!img?.isConnected) return false;
+    if (img.closest?.('[data-message-author-role="user"], article[data-turn="user"]')) return false;
+
+    const assistantTurn = img.closest?.(
+      '[data-message-author-role="assistant"], article[data-turn="assistant"], [data-testid^="conversation-turn"]'
+    );
+    if (!assistantTurn) return false;
+    if (assistantTurn.getAttribute?.('data-message-author-role') === 'user'
+      || assistantTurn.getAttribute?.('data-turn') === 'user'
+      || assistantTurn.querySelector?.('[data-message-author-role="user"]')) return false;
+
+    const generatedShell = img.closest?.(
+      '[id^="image-"][class*="imagegen-image"], [data-testid*="imagegen"], [data-testid*="generated-image"], [class*="imagegen-image"]'
+    );
+    const label = [
+      img.getAttribute?.('alt'),
+      img.getAttribute?.('aria-label'),
+      img.getAttribute?.('data-testid'),
+    ].filter(Boolean).join(' ');
+    return Boolean(generatedShell || /generated image|image generated|已生成图片|生成的图片/i.test(label));
+  }
+
   function imageGroupsOnPage() {
     const groups = new Map();
-    contentImageElements(document).forEach((img) => {
+    contentImageElements(document)
+      .filter(isAssistantGeneratedImage)
+      .filter((img) => isNearViewport(img))
+      .forEach((img) => {
       const container = imageTurnContainer(img);
       if (!container || container === document.body || container === document.documentElement) return;
       const images = groups.get(container) || [];
@@ -5562,7 +5611,8 @@
 
   function findImageActionRow(container) {
     const buttons = [...container.querySelectorAll('button')]
-      .filter((button) => !button.closest(`.${IMAGE_DOWNLOAD_SLOT_CLASS}, .${TEXT_DOWNLOAD_SLOT_CLASS}`));
+      .filter((button) => !button.closest(`.${IMAGE_DOWNLOAD_SLOT_CLASS}, .${TEXT_DOWNLOAD_SLOT_CLASS}`))
+      .filter((button) => !button.closest('[data-testid="image-gen-overlay-right-actions"], [data-testid*="image-gen-overlay"]'));
     const scored = buttons.map((button) => {
       const text = elementText(button);
       const score = /\u590d\u5236|copy|\u66f4\u591a|more|\u9009\u9879|options|\u5206\u4eab|share/i.test(text) ? 10 : 0;
@@ -5573,6 +5623,8 @@
       let row = button.parentElement;
       for (let depth = 0; row && depth < 4; depth += 1, row = row.parentElement) {
         if (row === container || row.querySelector?.('img')) continue;
+        if (row.matches?.('[data-testid="image-gen-overlay-right-actions"], [data-testid*="image-gen-overlay"]')
+          || row.closest?.('[data-testid="image-gen-overlay-right-actions"], [data-testid*="image-gen-overlay"]')) continue;
         const rowButtons = row.querySelectorAll?.('button') || [];
         if (rowButtons.length >= 1 && rowButtons.length <= 8) return row;
       }
@@ -5583,6 +5635,8 @@
   function isLikelyImageActionRow(row) {
     if (!row || !row.isConnected) return false;
     if (row.closest?.(`#${APP_ID}, #${MENU_ID}, #history, nav, aside, [role="navigation"]`)) return false;
+    if (row.matches?.('[data-testid="image-gen-overlay-right-actions"], [data-testid*="image-gen-overlay"]')
+      || row.closest?.('[data-testid="image-gen-overlay-right-actions"], [data-testid*="image-gen-overlay"]')) return false;
     if (row.querySelector?.('img')) return false;
     const rect = row.getBoundingClientRect?.();
     if (!rect || rect.width < 34 || rect.height < 18 || rect.height > 72) return false;
@@ -5602,7 +5656,7 @@
     const main = document.querySelector('main') || document.body;
     const rows = new Set();
     [...main.querySelectorAll('button')].forEach((button) => {
-      if (!isElementVisible(button) || button.closest(`.${IMAGE_DOWNLOAD_SLOT_CLASS}, .${TEXT_DOWNLOAD_SLOT_CLASS}`)) return;
+      if (!isElementVisible(button) || !isNearViewport(button) || button.closest(`.${IMAGE_DOWNLOAD_SLOT_CLASS}, .${TEXT_DOWNLOAD_SLOT_CLASS}`)) return;
       let row = button.parentElement;
       for (let depth = 0; row && depth < 5; depth += 1, row = row.parentElement) {
         if (isLikelyImageActionRow(row)) {
@@ -5622,9 +5676,10 @@
   function nearbyImagesForActionRow(row) {
     const rowRect = row.getBoundingClientRect();
     const maxActionGap = Math.max(96, Math.min(170, innerHeight * 0.18));
-    const sameTurn = row.closest?.('[data-testid^="conversation-turn"], [data-message-author-role], article, [class*="group/conversation-turn"]');
+    const sameTurn = row.closest?.('[data-testid^="conversation-turn"]')
+      || row.closest?.('[data-message-author-role="assistant"], article[data-turn="assistant"], [class*="group/conversation-turn"]');
     const sameTurnImages = sameTurn
-      ? broadImageElements(sameTurn, 24).filter((img) => {
+      ? broadImageElements(sameTurn, 24).filter(isAssistantGeneratedImage).filter((img) => {
         const rect = img.getBoundingClientRect();
         const gap = rowRect.top - rect.bottom;
         return gap > -70 && gap < maxActionGap && overlapRatio(rect, rowRect) > 0.08;
@@ -5640,15 +5695,17 @@
       const rect = ancestor.getBoundingClientRect?.();
       if (!rect || rect.height > Math.max(1400, innerHeight * 1.65)) continue;
       const images = broadImageElements(ancestor, 24)
+        .filter(isAssistantGeneratedImage)
         .filter((img) => {
           const imgRect = img.getBoundingClientRect();
           const gap = rowRect.top - imgRect.bottom;
           return gap > -70 && gap < maxActionGap && overlapRatio(imgRect, rowRect) > 0.08;
         });
-      if (images.length) return { container: ancestor, images };
+      if (images.length) return { container: imageTurnContainer(images[0]) || ancestor, images };
     }
 
     const candidates = broadImageElements(document, 24)
+      .filter(isAssistantGeneratedImage)
       .map((img) => ({ img, rect: img.getBoundingClientRect() }))
       .filter(({ rect }) => {
         const verticalGap = rowRect.top - rect.bottom;
@@ -5731,7 +5788,7 @@
   }
 
   function imageGroupUniqueCount(container, images = []) {
-    const candidates = imageGroupElements(container, images);
+    const candidates = imageGroupElements(container, images).filter(isAssistantGeneratedImage);
     const urlCount = uniqueImageUrls(candidates).length;
     const declaredCount = inferDeclaredImageCount(container, null);
     return Math.max(urlCount || candidates.length, declaredCount);
@@ -5860,6 +5917,7 @@
       slot.className = TEXT_DOWNLOAD_SLOT_CLASS;
       copyButton.insertAdjacentElement('afterend', slot);
     }
+    slot.__cgptTextDownloadCard = card;
     let button = slot.querySelector(`.${TEXT_DOWNLOAD_CLASS}`);
     if (!button) {
       button = document.createElement('button');
@@ -5867,10 +5925,72 @@
       button.className = TEXT_DOWNLOAD_CLASS;
       button.title = '下载这个文本为 TXT';
       button.setAttribute('aria-label', '下载 TXT');
-      button.innerHTML = icons.download;
+      button.innerHTML = `${icons.download}<span>下载 TXT</span>`;
       slot.append(button);
     }
     button.__cgptTextDownloadCard = card;
+    let copy = slot.querySelector(`.${TEXT_COPY_CLASS}`);
+    if (!copy) {
+      copy = document.createElement('button');
+      copy.type = 'button';
+      copy.className = TEXT_COPY_CLASS;
+      copy.textContent = '复制文案';
+      copy.setAttribute('aria-label', '复制本条文案');
+      copy.addEventListener('click', async (event) => {
+        event.preventDefault();
+        event.stopPropagation();
+        const text = textContentForDownload(copy.__cgptTextDownloadCard);
+        if (!text) return showImageDownloadToast('没有检测到可复制文案', false);
+        await navigator.clipboard.writeText(text);
+        showImageDownloadToast('文案已复制', true);
+      }, true);
+      slot.prepend(copy);
+    }
+    copy.__cgptTextDownloadCard = card;
+  }
+
+  function isLikelyPublishCopyCard(card) {
+    const text = textContentForDownload(card);
+    if (text.replace(/\s/g, '').length < 300) return false;
+    if (/母版页数不是输出上限|逐页迁移计划|迁移计划|等待.{0,12}(?:回复|输入).{0,6}1|暂时不出图/i.test(text)) return false;
+    return /#[^\s#]{2,}|(?:适合|地点|行程|玩法|团建|公司团队|出发前)/i.test(text);
+  }
+
+  function hydrateReplyBoundTools() {
+    const main = document.querySelector('main') || document.body;
+    const imageGroups = new Map();
+    [...main.querySelectorAll('img')].forEach((img) => {
+      if (!isAssistantGeneratedImage(img) || !isNearViewport(img)) return;
+      const turn = imageTurnContainer(img);
+      if (!turn) return;
+      const items = imageGroups.get(turn) || [];
+      items.push(img);
+      imageGroups.set(turn, items);
+    });
+    imageGroups.forEach((images, turn) => {
+      try {
+        const actionRow = findImageActionRow(turn);
+        ensureImageDownloadButton(turn, images, actionRow);
+      } catch (error) {
+        document.documentElement.dataset.tbImageToolsError = String(error?.message || error).slice(0, 240);
+      }
+    });
+
+    [...main.querySelectorAll('[data-message-author-role="assistant"]')].forEach((card) => {
+      if (!isNearViewport(card) || card.querySelector('img') || !isLikelyPublishCopyCard(card)) return;
+      const turn = card.closest?.('[data-testid^="conversation-turn"]') || card;
+      if (turn.querySelector(`.${TEXT_DOWNLOAD_SLOT_CLASS}`)) return;
+      const copyButton = [...turn.querySelectorAll('button')].find((button) => /复制|copy/i.test(elementText(button)));
+      if (copyButton) ensureTextDownloadButton(card, copyButton);
+      else {
+        const placeholder = document.createElement('button');
+        placeholder.type = 'button';
+        placeholder.hidden = true;
+        turn.append(placeholder);
+        ensureTextDownloadButton(card, placeholder);
+        placeholder.remove();
+      }
+    });
   }
 
   function refreshTextDownloadButtons() {
@@ -5881,7 +6001,7 @@
     }
     [...main.querySelectorAll(`.${TEXT_DOWNLOAD_SLOT_CLASS}`)].forEach((slot) => {
       const copyButton = slot.previousElementSibling;
-      const card = copyButton ? textCardForCopyButton(copyButton) : null;
+      const card = slot.__cgptTextDownloadCard || (copyButton ? textCardForCopyButton(copyButton) : null);
       if (!card) slot.remove();
     });
     [...main.querySelectorAll('button')].forEach((button) => {
@@ -5947,7 +6067,14 @@
       button.setAttribute('aria-label', '打包完成');
       return;
     }
-    button.innerHTML = `${icons.package}<span class="cgpt-work-package-label">下载并打包本组成品</span>`;
+    if (state === 'duplicate') {
+      button.classList.add('cgpt-work-package-done');
+      button.innerHTML = `${icons.package}<span class="cgpt-work-package-label">重复已跳过</span>`;
+      button.title = '历史图片组已存在，本轮暂存图片已清理';
+      button.setAttribute('aria-label', '重复已跳过');
+      return;
+    }
+    button.innerHTML = `${icons.package}<span class="cgpt-work-package-label">下载并打包</span>`;
     button.title = '打包作品：整理已下载图片和剪贴板文案';
     button.setAttribute('aria-label', '打包作品');
   }
@@ -5984,6 +6111,11 @@
       if (!response?.ok) {
         throw new Error(response?.error || '本地工作台未返回打包结果');
       }
+      if (response.duplicate) {
+        setWorkPackageButtonState(button, 'duplicate');
+        showImageDownloadToast(`历史图片组已存在，已清理 ${Number(response.deletedImages || 0)} 张暂存图`, true);
+        return;
+      }
       setWorkPackageButtonState(button, 'done');
       showImageDownloadToast('打包完成', true);
     } catch (error) {
@@ -6005,12 +6137,28 @@
   }
 
   function ensureImageDownloadButton(container, images, preferredActionRow = null) {
+    const generatedImages = (images || []).filter(isAssistantGeneratedImage);
+    if (!generatedImages.length) {
+      container?.querySelector?.(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`)?.remove();
+      return;
+    }
     if (!messageDownloadToolsEnabled()) {
       container.querySelector(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`)?.remove();
       return;
     }
+    // A single assistant turn can contain several carousel shells and more than
+    // one native action row.  Treat the outer conversation turn as the only
+    // production-image group, otherwise every carousel/action row injects its
+    // own copy of "download / package" controls.
+    const turn = generatedImages[0]?.closest?.('[data-testid^="conversation-turn"]');
+    if (turn) {
+      container = turn;
+      preferredActionRow = findImageActionRow(turn);
+    }
     container.setAttribute('data-cgpt-image-download-container', 'true');
-    let slot = container.querySelector(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`);
+    const existingSlots = [...container.querySelectorAll(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`)];
+    let slot = existingSlots.shift() || null;
+    existingSlots.forEach((duplicate) => duplicate.remove());
     if (preferredActionRow && slot && slot.parentElement !== preferredActionRow) {
       slot.remove();
       slot = null;
@@ -6025,8 +6173,8 @@
         container.append(slot);
       }
     }
-    const groupElements = imageGroupElements(container, images);
-    const count = imageGroupUniqueCount(container, images) || groupElements.length || images.length;
+    const groupElements = imageGroupElements(container, generatedImages).filter(isAssistantGeneratedImage);
+    const count = imageGroupUniqueCount(container, generatedImages) || groupElements.length || generatedImages.length;
     let button = slot.querySelector(`.${IMAGE_DOWNLOAD_CLASS}`);
     if (!button) {
       button = document.createElement('button');
@@ -6086,7 +6234,7 @@
   }
 
   function refreshImageDownloadButtons() {
-    actionRowsOnPage().forEach((row) => {
+    try { actionRowsOnPage().forEach((row) => {
       const existingSlot = row.querySelector(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`);
       const group = nearbyImagesForActionRow(row);
       if (!group?.images?.length) {
@@ -6101,12 +6249,61 @@
       if (!existingButton || previousElementCount !== currentElements.length || previousCount !== currentCount) {
         ensureImageDownloadButton(group.container, group.images, row);
       }
-    });
-    refreshTextDownloadButtons();
+    }); } catch (error) {
+      document.documentElement.dataset.tbImageToolsError = String(error?.message || error).slice(0, 240);
+    }
+    try { imageGroupsOnPage().forEach(([container, images]) => {
+      if (container.querySelector(`.${IMAGE_DOWNLOAD_CLASS}`)) return;
+      ensureImageDownloadButton(container, images);
+    }); } catch (error) {
+      document.documentElement.dataset.tbImageToolsError = String(error?.message || error).slice(0, 240);
+    }
+    hydrateReplyBoundTools();
+    // Final defensive pass: ChatGPT mutates action rows asynchronously, so an
+    // older slot may briefly survive while a replacement row is mounted. Keep
+    // exactly one slot per generated assistant turn.
+    try {
+      const main = document.querySelector('main') || document.body;
+      main.querySelectorAll(
+        `[data-testid="image-gen-overlay-right-actions"] .${IMAGE_DOWNLOAD_SLOT_CLASS}, [data-testid*="image-gen-overlay"] .${IMAGE_DOWNLOAD_SLOT_CLASS}`
+      ).forEach((slot) => slot.remove());
+      const slotsByTurn = new Map();
+      [...main.querySelectorAll(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`)].forEach((slot) => {
+        const turn = slot.closest?.('[data-testid^="conversation-turn"]');
+        if (!turn) return;
+        const slots = slotsByTurn.get(turn) || [];
+        slots.push(slot);
+        slotsByTurn.set(turn, slots);
+      });
+      slotsByTurn.forEach((slots) => slots.slice(1).forEach((slot) => slot.remove()));
+    } catch (error) {
+      document.documentElement.dataset.tbImageToolsError = String(error?.message || error).slice(0, 240);
+    }
+    try { refreshTextDownloadButtons(); } catch (error) {
+      document.documentElement.dataset.tbImageToolsError = String(error?.message || error).slice(0, 240);
+    }
+  }
+
+  function generatingNow() {
+    const stopSelectors = [
+      'button[data-testid="stop-button"]',
+      'button[aria-label*="Stop"]',
+      'button[aria-label*="stop"]',
+      'button[aria-label*="停止"]',
+    ];
+    return stopSelectors.some((selector) => [...document.querySelectorAll(selector)]
+      .some((button) => isElementVisible(button) && !button.disabled));
   }
 
   function scheduleImageDownloadButtons() {
     window.clearTimeout(imageToolsTimer);
+    // Streaming replies can mutate the DOM multiple times per second. Scanning
+    // a long image-heavy conversation for every token blocks ChatGPT's own
+    // renderer and delays the send/stop button state used by automation.
+    if (generatingNow()) {
+      imageToolsTimer = window.setTimeout(scheduleImageDownloadButtons, 2400);
+      return;
+    }
     imageToolsTimer = window.setTimeout(() => {
       runWhenIdle(refreshImageDownloadButtons, 1200);
     }, 420);
@@ -6126,6 +6323,7 @@
         triggerTextDownloadButton(textDownloadButton, event);
         return;
       }
+      if (event.target.closest?.(`.${TEXT_COPY_CLASS}`)) return;
       const imageDownloadButton = event.target.closest?.(`.${IMAGE_DOWNLOAD_CLASS}`);
       if (!imageDownloadButton) return;
       triggerImageDownloadButton(imageDownloadButton, event);
@@ -6915,6 +7113,43 @@
         lastStep() {
           return unsafeWindow.__cgptImageDownloadLastStep || null;
         },
+        async manualAction(action = 'download') {
+          refreshImageDownloadButtons();
+          await new Promise((resolve) => window.setTimeout(resolve, 120));
+          const imageButtons = [...document.querySelectorAll(`.${IMAGE_DOWNLOAD_CLASS}`)]
+            .filter((button) => button.isConnected && !button.disabled);
+          const imageButton = imageButtons.at(-1) || null;
+          const packageButton = imageButton?.closest(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`)
+            ?.querySelector(`.${WORK_PACKAGE_CLASS}`) || null;
+          const textButtons = [...document.querySelectorAll(`.${TEXT_DOWNLOAD_CLASS}`)]
+            .filter((button) => button.isConnected && !button.disabled);
+          const textButton = textButtons.at(-1) || null;
+          if (action === 'download') {
+            if (!imageButton) return { ok: false, error: '当前页面没有检测到可下载的生成图片' };
+            triggerImageDownloadButton(imageButton);
+            return { ok: true, action, count: Number(imageButton.dataset.cgptImageTotal || 0) };
+          }
+          if (action === 'package') {
+            if (!packageButton) return { ok: false, error: '当前页面没有检测到可打包的生成图片组' };
+            await triggerWorkPackageButton(packageButton);
+            return { ok: true, action };
+          }
+          if (action === 'copy-text') {
+            const card = textButton?.__cgptTextDownloadCard
+              || textCardForCopyButton(textButton?.closest?.(`.${TEXT_DOWNLOAD_SLOT_CLASS}`)?.previousElementSibling);
+            const text = textContentForDownload(card);
+            if (!text) return { ok: false, error: '当前页面没有检测到可复制的成品文案' };
+            await navigator.clipboard.writeText(text);
+            showImageDownloadToast('文案已复制', true);
+            return { ok: true, action, characters: text.length };
+          }
+          if (action === 'download-text') {
+            if (!textButton) return { ok: false, error: '当前页面没有检测到可下载的成品文案' };
+            triggerTextDownloadButton(textButton);
+            return { ok: true, action };
+          }
+          return { ok: false, error: `未知手动操作：${action}` };
+        },
       };
     } catch (error) {
       console.warn('[ChatGPT 图片下载快捷按钮] 安装调试入口失败：', error);
@@ -6963,6 +7198,10 @@
   });
   observer.observe(document.documentElement, { childList: true, subtree: true });
 
+  // Historical image controls are hydrated lazily as the user scrolls near
+  // them instead of scanning an entire long conversation during startup.
+  document.addEventListener('scroll', () => scheduleImageDownloadButtons(), { passive: true, capture: true });
+
   document.addEventListener('visibilitychange', () => {
     if (document.hidden) return;
     scheduleScan();
@@ -6994,6 +7233,11 @@
   bindImageDownloadEvents();
   installImageDownloadDebugApi();
   addDiagnosticLog('script:init');
+  // Prompt and download tools must keep their own styles even when ChatGPT hides
+  // or virtualizes the recent-conversation list.  The old userscript mounted
+  // styles only after finding that list, which left the prompt panel appended
+  // as an unstyled block at the bottom of the page.
+  injectStyles();
   window.addEventListener('tb-workbench-tools-visibility', () => {
     ensurePromptButton();
     scheduleImageDownloadButtons();
