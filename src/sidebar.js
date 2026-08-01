@@ -1483,6 +1483,18 @@
     const initialAssistantKeys = workflow.initialAssistantKeys ?? assistantTurnKeys();
     workflow.initialAssistantKeys = initialAssistantKeys;
     const templateInitialization = task.entry.taskType === "template-init";
+    // Current-session random mode reuses the plan already present in the
+    // conversation instead of injecting another migration prompt.
+    if (noPromptMode && !workflow.planDone) {
+      const existingPlanText = assistantTurns().map(cleanAssistantText).join("\n").trim();
+      const existingPlanCount = parsePlannedImageCount(existingPlanText);
+      if (existingPlanCount && /迁移计划|逐页|P\s*1|第\s*1\s*页/i.test(existingPlanText)) {
+        workflow.planDone = true;
+        workflow.planText = existingPlanText;
+        workflow.plannedImageCount = existingPlanCount;
+        await saveCheckpoint("复用当前会话母版计划", 32);
+      }
+    }
     if (!workflow.planDone) {
       if (!workflow.planSubmitted) {
         reportWorkbenchProgress(
@@ -1663,13 +1675,19 @@
     await saveCheckpoint("作品打包完成", 96);
     reportWorkbenchProgress(task, "完成", 100, `已打包 ${downloadedImages} 张图片和小红书文案`);
     let archiveResult = null;
-    if (options.autoArchive !== false && task.entry.taskType === "material" && task.entry.materialPath) {
+    // Material rows from the local tree carry `entryKind` and `path`; bridge
+    // messages may carry `taskType` and `materialPath`.  Accept both shapes so
+    // a successful production always archives the exact source folder once,
+    // instead of silently leaving it in the source category.
+    const materialPath = String(task.entry.materialPath || task.entry.path || "").trim();
+    const isMaterialTask = task.entry.entryKind === "material" || task.entry.taskType === "material";
+    if (options.autoArchive !== false && isMaterialTask && materialPath) {
       reportWorkbenchProgress(task, "归档素材", 97, "作品已校验，正在登记使用次数并移动原素材");
       archiveResult = await api("/api/gpt-production/archive-material", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
-          entryPath: task.entry.materialPath,
+          entryPath: materialPath,
           requestId: task.entry.externalRequestId,
           templateId: task.entry.templateId || "",
           conversationUrl: location.href,
@@ -1724,7 +1742,8 @@
       const paths = (entry.attachments || []).slice(0, 30);
       let files = [];
       let workflowResult = null;
-      const resumeExistingWorkflow = Boolean(task.workflow?.planSubmitted || entry.retryFromStage);
+      const resumeExistingWorkflow = !entry.forceUpload
+        && Boolean(task.workflow?.planSubmitted || entry.retryFromStage);
       if (!resumeExistingWorkflow && !paths.length) throw new Error("这个文件夹里没有可上传的图片或文案");
       if (resumeExistingWorkflow) {
         reportWorkbenchProgress(
@@ -2325,12 +2344,14 @@
       : [];
     const prompt = String(message.prompt || "").trim().slice(0, 30000);
     const retryFromStage = String(message.retryFromStage || "").trim();
+    const forceUpload = Boolean(message.forceUpload);
     const taskOptions = message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {};
+    const noPromptMode = taskOptions.mode === "random";
     localStorage.setItem("tb-workbench-prompt-library-enabled", taskOptions.promptLibraryEnabled === false ? "0" : "1");
     localStorage.setItem("tb-workbench-message-downloads-enabled", taskOptions.messageDownloadsEnabled === false ? "0" : "1");
     window.dispatchEvent(new CustomEvent("tb-workbench-tools-visibility"));
-    const resumeOnly = Boolean(retryFromStage);
-    if (!requestId || (!resumeOnly && (!attachments.length || !prompt))) {
+    const resumeOnly = Boolean(retryFromStage) && !forceUpload;
+    if (!requestId || (!resumeOnly && (!attachments.length || (!prompt && !noPromptMode)))) {
       window.postMessage({
         source: "tb-gpt-production-extension",
         type: "tb-workbench-task-result",
@@ -2349,6 +2370,8 @@
       retryTask.entry.autoOptions = taskOptions;
       retryTask.entry.retryFromStage = String(message.retryFromStage || "");
       retryTask.entry.retryFromPercent = Number(message.retryFromPercent || 0);
+      retryTask.entry.forceUpload = forceUpload;
+      if (forceUpload) retryTask.workflow = {};
       retryTask.status = "queued";
       retryTask.error = "";
       retryTask.controller = new AbortController();
@@ -2373,7 +2396,8 @@
       autoOptions: taskOptions,
       expectedImages: Math.max(0, Number(message.expectedImages || 0)),
       retryFromStage,
-      retryFromPercent: Number(message.retryFromPercent || 0)
+      retryFromPercent: Number(message.retryFromPercent || 0),
+      forceUpload
     });
   }
 

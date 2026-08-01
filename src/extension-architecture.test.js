@@ -40,7 +40,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.14");
+  assert.equal(manifest.version, "0.2.15");
 });
 
 test("GPT web controls stay visible and place prompt panel inside viewport", () => {
@@ -311,4 +311,12 @@ test("automatic copy waits for streaming to finish before packaging", () => {
   assert.match(waitSource, /stableSince/);
   assert.match(waitSource, />= 2_500/);
   assert.doesNotMatch(waitSource, /isLikelyPublishCopy\(text, 300\)\) return/);
+});
+
+test("resume after a pre-bridge pause forces the material upload instead of skipping attachments", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /const forceUpload = Boolean\(message\.forceUpload\)/);
+  assert.match(source, /const resumeOnly = Boolean\(retryFromStage\) && !forceUpload/);
+  assert.match(source, /const resumeExistingWorkflow = !entry\.forceUpload/);
+  assert.match(source, /retryTask\.entry\.forceUpload = forceUpload/);
 });
