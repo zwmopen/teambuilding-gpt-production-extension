@@ -1099,8 +1099,8 @@
     return null;
   }
 
-  function generatedImageNodes() {
-    return [...document.querySelectorAll([
+  function generatedImageNodes(scope = document) {
+    return [...scope.querySelectorAll([
       'img[alt^="已生成图片"]',
       'img[alt="输出图片"]',
       'img[alt*="generated image" i]',
@@ -1116,6 +1116,37 @@
     return uniqueGeneratedImageUrls(generatedImageNodes().map(imageUrl));
   }
 
+  function generatedImageCompletionEvidence(urls) {
+    const wanted = new Set(uniqueGeneratedImageUrls(urls || []));
+    if (!wanted.size) return null;
+    const turns = assistantTurns();
+    for (let index = turns.length - 1; index >= 0; index -= 1) {
+      const turn = turns[index];
+      const turnUrls = uniqueGeneratedImageUrls(generatedImageNodes(turn).map(imageUrl));
+      const matched = turnUrls.filter((url) => wanted.has(url));
+      if (!matched.length) continue;
+      // ChatGPT adds the native copy-reply action only after the whole
+      // assistant response has settled. This is substantially safer than
+      // treating a short pause after the first generated image as completion.
+      const responseComplete = Boolean(turn.querySelector([
+        '[data-testid="copy-turn-action-button"]',
+        'button[aria-label*="复制回复"]',
+        'button[aria-label*="Copy response" i]'
+      ].join(",")));
+      const declaredCounts = [...turn.querySelectorAll('button[aria-label]')]
+        .map((button) => String(button.getAttribute("aria-label") || "").match(/(?:共|of)\s*(\d{1,3})\s*(?:张)?/i))
+        .map((match) => Number(match?.[1] || 0))
+        .filter((count) => count > 0 && count < 100);
+      return {
+        responseComplete,
+        turnKey: assistantTurnKey(turn, index),
+        turnImageCount: turnUrls.length,
+        declaredCount: declaredCounts.length ? Math.max(...declaredCounts) : 0
+      };
+    }
+    return null;
+  }
+
   function dismissImageComparison() {
     const buttons = [...document.querySelectorAll("button")].filter((button) => {
       const rect = button.getBoundingClientRect();
@@ -1124,11 +1155,11 @@
     buttons.at(-1)?.click();
   }
 
-  async function waitForGeneratedImageGrowth(baselineUrls, previousCount, timeout) {
+  async function waitForGeneratedImageGrowth(baselineUrls, previousCount, timeout, expectedCount = 0) {
     const baseline = new Set(baselineUrls || []);
     const started = Date.now();
     let stableSince = 0;
-    let stoppedWithoutGrowthSince = 0;
+    let quietWithoutCompletionSince = 0;
     let lastSignature = "";
     while (Date.now() - started < timeout) {
       const pauseReason = platformPauseReason();
@@ -1136,31 +1167,55 @@
       dismissImageComparison();
       const urls = generatedImageUrls().filter((url) => !baseline.has(url));
       const signature = urls.join("|");
-      if (urls.length > previousCount && signature === lastSignature && !generatingNow()) {
+      const completion = generatedImageCompletionEvidence(urls);
+      const pageGenerating = generatingNow();
+      if (urls.length > previousCount && signature === lastSignature && !pageGenerating) {
         if (!stableSince) stableSince = Date.now();
       } else {
         stableSince = 0;
+        if (signature !== lastSignature) quietWithoutCompletionSince = Date.now();
         lastSignature = signature;
       }
-      if (previousCount > 0 && urls.length === previousCount && !generatingNow()) {
-        if (!stoppedWithoutGrowthSince) stoppedWithoutGrowthSince = Date.now();
-      } else {
-        stoppedWithoutGrowthSince = 0;
+      const stableFor = stableSince ? Date.now() - stableSince : 0;
+      const reachedExpected = Number(expectedCount) > 0 && urls.length >= Number(expectedCount);
+      if (urls.length > previousCount && stableFor >= 3_000 && (reachedExpected || completion?.responseComplete)) {
+        return {
+          urls,
+          confident: true,
+          evidence: reachedExpected ? "expected-count" : "assistant-response-complete",
+          completion
+        };
       }
-      if (urls.length > previousCount && stableSince && Date.now() - stableSince >= 8_000) return urls;
-      if (stoppedWithoutGrowthSince && Date.now() - stoppedWithoutGrowthSince >= 15_000) return urls;
+      // Compatibility fallback for a future ChatGPT DOM change: wait three
+      // full minutes of no URL changes. The caller may continue with a safe
+      // image count, but a low count without completion evidence must never
+      // be promoted to an account-limit signal.
+      if (urls.length > previousCount && !pageGenerating && quietWithoutCompletionSince
+        && Date.now() - quietWithoutCompletionSince >= 180_000) {
+        return { urls, confident: false, evidence: "long-quiet-fallback", completion };
+      }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    throw new Error(`等待套图完成超时，当前只检测到 ${previousCount} 张本轮图片`);
+    const urls = generatedImageUrls().filter((url) => !baseline.has(url));
+    return {
+      urls,
+      confident: false,
+      evidence: "timeout",
+      completion: generatedImageCompletionEvidence(urls)
+    };
   }
 
   function generatingNow() {
     return [...document.querySelectorAll("button")].some((button) => {
       const rect = button.getBoundingClientRect();
-      if (button.disabled || rect.width <= 0 || rect.height <= 0) return false;
-      const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""} ${button.textContent || ""}`;
-      return /stop generating|stop streaming|stop response|\u505c\u6b62\u751f\u6210|\u505c\u6b62\u56de\u7b54/i.test(label);
-    });
+      if (rect.width <= 0 || rect.height <= 0) return false;
+      const label = `${button.getAttribute("aria-label") || ""} ${button.title || ""} ${button.textContent || ""} ${button.getAttribute("data-testid") || ""}`;
+      return /stop.{0,12}(?:generating|streaming|response|thinking)|\u505c\u6b62.{0,12}(?:\u751f\u6210|\u56de\u7b54|\u54cd\u5e94|\u6d41\u5f0f|\u601d\u8003)|stop-button/i.test(label);
+    }) || Boolean(document.querySelector([
+      '[data-message-author-role="assistant"][data-is-streaming="true"]',
+      '.result-streaming',
+      '[data-testid*="streaming" i]'
+    ].join(",")));
   }
 
   function platformPauseReason() {
@@ -1607,11 +1662,37 @@
       const baselineUrls = Array.isArray(workflow.generatedBaselineUrls) ? workflow.generatedBaselineUrls : [];
       let detected = Array.isArray(imageUrls) ? imageUrls : [];
       reportWorkbenchProgress(task, "等待图片", 48, `已发送 1，正在等待本轮 ${expectedImages} 张图片生成`);
-      detected = await waitForGeneratedImageGrowth(baselineUrls, detected.length, taskTimeout);
+      const imageDetection = await waitForGeneratedImageGrowth(
+        baselineUrls,
+        detected.length,
+        taskTimeout,
+        expectedImages
+      );
+      detected = imageDetection.urls;
       workflow.generatedImageUrls = detected;
-      reportWorkbenchProgress(task, "等待图片", 64, `GPT 本轮已停止生成，检测到 ${detected.length} 张新图（计划 ${expectedImages} 张）`);
+      workflow.generatedImageDetection = {
+        confident: imageDetection.confident,
+        evidence: imageDetection.evidence,
+        detectedAt: new Date().toISOString(),
+        turnKey: imageDetection.completion?.turnKey || "",
+        declaredCount: Number(imageDetection.completion?.declaredCount || 0)
+      };
+      reportWorkbenchProgress(
+        task,
+        "等待图片",
+        64,
+        `已核对本轮 ${detected.length} 张新图（计划 ${expectedImages} 张；${imageDetection.confident ? "回复已完整结束" : "检测证据不足"}）`
+      );
+      if (!imageDetection.confident && detected.length < minimumImages) {
+        const error = new Error(`图片数量检测不确定：当前找到 ${detected.length} 张，但没有取得“回复完整结束”证据；已暂停当前素材，未判定额度触顶`);
+        error.code = "IMAGE_COUNT_UNCERTAIN";
+        error.detectedImages = detected.length;
+        throw error;
+      }
       if (detected.length < minimumImages) {
-        throw new Error(`生成结果不足：本轮只检测到 ${detected.length} 张，安全线为 ${minimumImages} 张；本素材已跳过，不补页、不续作、不打包`);
+        const error = new Error(`生成结果不足：本轮完整回复只有 ${detected.length} 张，安全线为 ${minimumImages} 张；本素材已跳过，不补页、不续作、不打包`);
+        error.detectedImages = detected.length;
+        throw error;
       }
       imageUrls = detected;
       workflow.generatedImageUrls = imageUrls;
@@ -1898,6 +1979,7 @@
         const errorCode = String(error?.code || (pendingComposerAttachments > 0 ? "COMPOSER_ATTACHMENTS_PENDING" : ""));
         reportWorkbenchTask(task, "failed", error.message || "upload failed", {
           errorCode,
+          detectedImages: Number(error?.detectedImages || 0),
           pendingComposerAttachments,
           stage: task.lastStage || "",
           percent: Number(task.lastPercent || 0)

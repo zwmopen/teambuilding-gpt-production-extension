@@ -40,7 +40,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.17");
+  assert.equal(manifest.version, "0.2.18");
 });
 
 test("GPT web controls stay visible and place prompt panel inside viewport", () => {
@@ -106,7 +106,7 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.doesNotMatch(source, /textRetrySubmitted/);
   assert.match(source, /generatedImageNodes/);
   assert.match(source, /img\[alt="输出图片"\]/);
-  assert.match(source, /button\.disabled \|\| rect\.width <= 0 \|\| rect\.height <= 0/);
+  assert.match(source, /rect\.width <= 0 \|\| rect\.height <= 0/);
   assert.match(source, /const roleTurns = \[\.\.\.document\.querySelectorAll\('\[data-message-author-role="assistant"\]'\)\]/);
   assert.match(source, /turn\.closest\('\[data-message-author-role\]'\) === turn/);
   assert.match(source, /function assistantTurnKey\(turn, index = 0\)/);
@@ -118,9 +118,10 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /图片后台下载/);
   assert.match(source, /剪贴板不可用，继续直接写入 TXT/);
   assert.match(source, /"等待迁移计划"/);
-  assert.match(source, /stop response\|\\u505c\\u6b62\\u751f\\u6210\|\\u505c\\u6b62\\u56de\\u7b54/);
+  assert.match(source, /stop\.\{0,12\}.*generating.*streaming.*response.*thinking/);
+  assert.match(source, /data-message-author-role="assistant"\]\[data-is-streaming="true"\]/);
   assert.match(source, /dismissImageComparison\(\);[\s\S]*generatedImageUrls/);
-  assert.match(source, /stoppedWithoutGrowthSince/);
+  assert.match(source, /generatedImageCompletionEvidence/);
   assert.match(source, /parsePlannedImageCount/);
   assert.doesNotMatch(source, /buildMissingPagesPrompt/);
   assert.match(source, /不补页、不续作、不打包/);
@@ -135,6 +136,21 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /packageResult\.duplicate/);
   assert.match(source, /duplicateSkipped:\s*true/);
   assert.match(source, /已删除本轮/);
+});
+
+test("generated image detection does not stop during the pause after the first image", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const start = source.indexOf("async function waitForGeneratedImageGrowth");
+  const end = source.indexOf("function generatingNow", start);
+  const waitSource = source.slice(start, end);
+  assert.ok(start > -1 && end > start);
+  assert.match(source, /copy-turn-action-button/);
+  assert.match(source, /assistant-response-complete/);
+  assert.match(waitSource, /completion\?\.responseComplete/);
+  assert.match(waitSource, /180_000/);
+  assert.doesNotMatch(waitSource, />= 8_000/);
+  assert.match(source, /IMAGE_COUNT_UNCERTAIN/);
+  assert.match(source, /未判定额度触顶/);
 });
 
 test("右侧生产舱同时声明成品、素材、路径设置和附件上传入口", () => {
