@@ -40,7 +40,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.18");
+  assert.equal(manifest.version, "0.2.21");
 });
 
 test("GPT web controls stay visible and place prompt panel inside viewport", () => {
@@ -109,11 +109,10 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /generatedImageNodes/);
   assert.match(source, /img\[alt="输出图片"\]/);
   assert.match(source, /rect\.width <= 0 \|\| rect\.height <= 0/);
-  assert.match(source, /const roleTurns = \[\.\.\.document\.querySelectorAll\('\[data-message-author-role="assistant"\]'\)\]/);
-  assert.match(source, /turn\.closest\('\[data-message-author-role\]'\) === turn/);
+  assert.match(source, /const outerTurns = \[\.\.\.document\.querySelectorAll\('\[data-testid\^="conversation-turn"\]'\)\]/);
   assert.match(source, /function assistantTurnKey\(turn, index = 0\)/);
   assert.match(source, /baselineKeys: initialAssistantKeys/);
-  assert.match(source, /Date\.now\(\) - stableSince >= 1_800/);
+  assert.match(source, /stableFor >= 8_000/);
   assert.match(source, /1_000 \+ Math\.floor\(Math\.random\(\) \* 4_001\)/);
   assert.match(source, /恢复迁移计划/);
   assert.match(source, /恢复小红书文案/);
@@ -147,12 +146,37 @@ test("generated image detection does not stop during the pause after the first i
   const waitSource = source.slice(start, end);
   assert.ok(start > -1 && end > start);
   assert.match(source, /copy-turn-action-button/);
-  assert.match(source, /assistant-response-complete/);
+  assert.match(source, /assistant-response-quiet-complete/);
   assert.match(waitSource, /completion\?\.responseComplete/);
+  assert.match(waitSource, /completion\?\.declaredCount/);
+  assert.match(waitSource, /stableFor >= 45_000/);
+  assert.match(source, /stableFor >= 8_000/);
   assert.match(waitSource, /180_000/);
-  assert.doesNotMatch(waitSource, />= 8_000/);
+  assert.doesNotMatch(waitSource, /stableFor >= 3_000/);
   assert.match(source, /IMAGE_COUNT_UNCERTAIN/);
   assert.match(source, /未判定额度触顶/);
+  assert.match(source, /workflow\.plannedImageCount = taskExpectedImages \|\| recoveredImageUrls\.length/);
+  assert.match(source, /freshImageUrls\(\[turns\[index\]\]\)\.length === taskExpectedImages/);
+  assert.doesNotMatch(source, /等待图片\|生成图片\|下载图片\|download\/i\.test\(String\(task\.entry\.retryFromStage \|\| ""\)\) && !workflow\.planDone/);
+  assert.match(source, /outerTurns[\s\S]*!turn\.querySelector\('\[data-message-author-role="user"\]'\)[\s\S]*article\[data-turn="assistant"\]/);
+});
+
+test("generated image detection includes folded ChatGPT sandbox image artifacts", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /function sandboxImageArtifact\(button\)/);
+  assert.match(source, /__reactFiber\$/);
+  assert.match(source, /props\.filepath/);
+  assert.match(source, /props\.messageId/);
+  assert.match(source, /interpreter\/download/);
+  assert.match(source, /url\.searchParams\.set\("sandbox_path", filepath\)/);
+  assert.match(source, /function generatedImageArtifacts\(scope = document\)/);
+  assert.match(source, /\.\.\.generatedImageArtifacts\(scope\)\.map/);
+  assert.match(source, /turn\?\.closest\?\.\('\[data-testid\^="conversation-turn"\]'\)/);
+  assert.match(source, /scopes\.flatMap\(\(scope\) => generatedImageArtifacts\(scope\)/);
+  assert.match(source, /function freshGeneratedImageUrls\(baselineUrls = \[\]\)/);
+  assert.match(source, /if \(artifactUrls\.length\) return artifactUrls/);
+  assert.match(source, /resolveSandboxArtifactUrl/);
+  assert.match(source, /img\[alt=/);
 });
 
 test("右侧生产舱同时声明成品、素材、路径设置和附件上传入口", () => {
@@ -278,17 +302,23 @@ test("素材文件夹支持母标签、季节节日分组、哈希、次数筛�
   assert.match(css, /\.tb-material-settings/);
 });
 
-test("扩展内的打包按钮直连工作台，不再默认唤起 VBS 协议", () => {
+test("手动和自动打包共用工作台唯一接口，不再默认唤起 VBS 协议", () => {
   const background = fs.readFileSync(path.join(root, "background.js"), "utf8");
+  const sidebar = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
   assert.match(background, /tb-work-package/);
   assert.match(background, /\/api\/extension\/work-package/);
+  assert.match(sidebar, /async function packageDownloadedReply/);
+  assert.match(sidebar, /TeambuildingGptProductionPackage = packageDownloadedReply/);
+  assert.match(sidebar, /workflow\.packageResult \|\| await packageDownloadedReply/);
   const triggerStart = vendor.indexOf("async function triggerWorkPackageButton");
   const triggerEnd = vendor.indexOf("function openWorkPackageProtocol", triggerStart);
   const triggerSource = vendor.slice(triggerStart, triggerEnd);
+  assert.match(triggerSource, /TeambuildingGptProductionPackage/);
   assert.match(triggerSource, /chrome\.runtime\.sendMessage/);
   assert.match(triggerSource, /tb-work-package/);
   assert.doesNotMatch(triggerSource, /openWorkPackageProtocol/);
+  assert.doesNotMatch(triggerSource, /window\.alert/);
   assert.match(triggerSource, /response\.duplicate/);
   assert.match(triggerSource, /setWorkPackageButtonState\(button, 'duplicate'\)/);
   assert.match(vendor, /重复已跳过/);
@@ -317,6 +347,8 @@ test("manual production can invoke visible download, package and text actions", 
   assert.match(vendor, /action === 'copy-text'/);
   assert.match(vendor, /action === 'download-text'/);
   assert.match(vendor, /refreshImageDownloadButtons\(\)/);
+  assert.match(vendor, /tb-workbench-manual-action/);
+  assert.match(vendor, /tb-workbench-manual-action-result/);
 });
 
 test("manual and automatic downloads persist a reply-bound used marker", () => {
@@ -332,6 +364,23 @@ test("manual and automatic downloads persist a reply-bound used marker", () => {
   assert.match(vendor, /document\.addEventListener\('tb-gpt-image-download-complete'/);
   assert.match(vendor, /rememberImageDownload\(button, downloaded, totalImages, batchId, 'downloaded'\)/);
   assert.match(vendor, /rememberImageDownload\(imageButton, downloadResult\.downloaded, downloadResult\.total, downloadResult\.batchId, 'packaged'\)/);
+});
+
+test("download-only remains reusable by the later manual package action", () => {
+  const source = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  assert.match(source, /const priorDownload = imageDownloadRecordForButton\(imageButton\)/);
+  assert.match(source, /priorDownload\.state === 'downloaded'/);
+  assert.match(source, /复用已下载图片/);
+});
+
+test("manual image buttons reuse the authenticated workbench download path", () => {
+  const sidebar = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const userscript = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  assert.match(sidebar, /save-generated-image/);
+  assert.match(userscript, /fetch\(url, \{ credentials: 'include', cache: 'no-store' \}\)/);
+  assert.match(userscript, /\/api\/extension\/save-generated-image/);
+  assert.match(userscript, /await saveResponse\.json/);
+  assert.match(userscript, /imageBufferToBase64/);
 });
 
 test("automatic copy waits for streaming to finish before packaging", () => {
@@ -375,6 +424,14 @@ test("one material task cannot stack another post into the current GPT composer"
   assert.match(source, /const pendingComposerAttachments = attachmentPreviewCount\(\)/);
 });
 
+test("a fresh material waits until the previous GPT response is truly idle", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /async function waitForPageIdleBeforeFreshUpload/);
+  assert.match(source, /WEB_RESPONSE_IN_FLIGHT/);
+  assert.match(source, /await waitForPageIdleBeforeFreshUpload\(/);
+  assert.match(source, /等待上一帖完成/);
+});
+
 test("automatic production derives no-prompt mode inside the workflow scope", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const start = source.indexOf("async function runAutomaticProduction");
@@ -382,4 +439,12 @@ test("automatic production derives no-prompt mode inside the workflow scope", ()
   const workflow = source.slice(start, end);
   assert.match(workflow, /const noPromptMode = options\.mode === "random"/);
   assert.match(workflow, /if \(noPromptMode && !workflow\.planDone\)/);
+});
+
+test("online share templates are continued into an editable conversation before upload", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /function ensureEditableConversation/);
+  assert.match(source, /Continue \(\?:this \)\?conversation/);
+  assert.match(source, /在线模板当前不可编辑/);
+  assert.match(source, /await ensureEditableConversation\(\)/);
 });

@@ -695,6 +695,18 @@
       || document.querySelector('[data-testid*="composer"] [contenteditable="true"]');
   }
 
+  async function ensureEditableConversation() {
+    if (composer()) return true;
+    if (!/^\/share\//i.test(location.pathname)) return false;
+    const continueButton = [...document.querySelectorAll("button, a")].find((node) => {
+      const text = String(node.innerText || node.textContent || "").trim();
+      return /继续(?:此|该)?对话|继续聊天|Continue (?:this )?conversation/i.test(text);
+    });
+    if (!continueButton) return false;
+    continueButton.click();
+    return waitFor(() => Boolean(composer()), 20_000);
+  }
+
   function mergeComposerText(existing, addition) {
     const current = String(existing || "");
     if (!current.trim()) return addition;
@@ -1002,18 +1014,17 @@
   }
 
   function assistantTurns() {
+    const outerTurns = [...document.querySelectorAll('[data-testid^="conversation-turn"]')];
+    if (outerTurns.length) {
+      return outerTurns
+        .filter((turn) => !turn.querySelector('[data-message-author-role="user"]'))
+        .map((turn) => turn.querySelector('[data-message-author-role="assistant"], article[data-turn="assistant"]') || turn);
+    }
+
     const roleTurns = [...document.querySelectorAll('[data-message-author-role="assistant"]')]
       .filter((turn) => turn.closest('[data-message-author-role]') === turn);
     if (roleTurns.length) return roleTurns;
-
-    const articleTurns = [...document.querySelectorAll('article[data-turn="assistant"]')];
-    if (articleTurns.length) return articleTurns;
-
-    // Older ChatGPT markup fallback. Do not combine this outer turn wrapper
-    // with an inner assistant node: the wrapper can contain a live
-    // "Thought for ..." timer and would keep the stability signature changing.
-    return [...document.querySelectorAll('[data-testid^="conversation-turn"]')]
-      .filter((turn) => !turn.querySelector('[data-message-author-role="user"]'));
+    return [...document.querySelectorAll('article[data-turn="assistant"]')];
   }
 
   function conversationRoleTurns() {
@@ -1112,8 +1123,133 @@
     });
   }
 
+  function reactFiberForNode(node) {
+    if (!node) return null;
+    const key = Object.keys(node).find((name) => name.startsWith("__reactFiber$"));
+    return key ? node[key] : null;
+  }
+
+  function sandboxImageArtifact(button) {
+    const visibleName = String(button?.getAttribute?.("aria-label") || button?.textContent || "").trim();
+    if (!/\.(?:png|jpe?g|webp|gif|avif)$/i.test(visibleName)) return null;
+    let fiber = reactFiberForNode(button);
+    let fileName = visibleName;
+    let filepath = "";
+    let messageId = "";
+    for (let depth = 0; fiber && depth < 12; depth += 1, fiber = fiber.return) {
+      const props = fiber.memoizedProps || fiber.pendingProps || {};
+      fileName = String(props.fileName || fileName).trim();
+      filepath = String(props.filepath || filepath).trim();
+      messageId = String(props.messageId || messageId).trim();
+      if (filepath && messageId) break;
+    }
+    if (!/^\/mnt\/data\//i.test(filepath) || !messageId) return null;
+    const conversationId = String(location.pathname.match(/\/c\/([^/?#]+)/)?.[1] || "").trim();
+    if (!conversationId) return null;
+    const url = new URL(
+      `/backend-api/conversation/${encodeURIComponent(conversationId)}/interpreter/download`,
+      location.origin
+    );
+    url.searchParams.set("message_id", messageId);
+    url.searchParams.set("sandbox_path", filepath);
+    return { url: url.href, fileName, filepath, messageId };
+  }
+
+  function sandboxArtifactPlaceholder(button, fileName) {
+    const outerTurn = button?.closest?.('[data-testid^="conversation-turn"]');
+    const assistantTurn = button?.closest?.('[data-message-author-role="assistant"], article[data-turn="assistant"]')
+      || outerTurn;
+    const turns = assistantTurns();
+    const index = Math.max(0, turns.indexOf(assistantTurn));
+    const turnKey = assistantTurnKey(assistantTurn, index);
+    return `https://tb-workbench.invalid/sandbox-artifact/${encodeURIComponent(turnKey)}?file=${encodeURIComponent(fileName)}`;
+  }
+
+  function generatedImageArtifacts(scope = document) {
+    return [...scope.querySelectorAll("button[aria-label]")]
+      .filter((button) => !button.closest('[data-message-author-role="user"]'))
+      .map((button) => {
+        const fileName = String(button.getAttribute("aria-label") || button.textContent || "").trim();
+        if (!/\.(?:png|jpe?g|webp|gif|avif)$/i.test(fileName)) return null;
+        return sandboxImageArtifact(button) || {
+          url: sandboxArtifactPlaceholder(button, fileName),
+          fileName,
+          button
+        };
+      })
+      .filter(Boolean);
+  }
+
+  function parseSandboxArtifactPlaceholder(value) {
+    try {
+      const url = new URL(String(value || ""));
+      if (url.hostname !== "tb-workbench.invalid" || !url.pathname.startsWith("/sandbox-artifact/")) return null;
+      return {
+        turnKey: decodeURIComponent(url.pathname.slice("/sandbox-artifact/".length)),
+        fileName: String(url.searchParams.get("file") || "")
+      };
+    } catch {
+      return null;
+    }
+  }
+
+  async function resolveSandboxArtifactUrl(value, timeout = 20_000) {
+    const target = parseSandboxArtifactPlaceholder(value);
+    if (!target) return value;
+    const turns = assistantTurns();
+    const keyedWrapper = document.querySelector(`[data-testid="${CSS.escape(target.turnKey)}"]`);
+    const turn = keyedWrapper
+      || turns.find((candidate, index) => assistantTurnKey(candidate, index) === target.turnKey);
+    const button = [...(turn?.querySelectorAll?.("button[aria-label]") || [])]
+      .find((candidate) => String(candidate.getAttribute("aria-label") || "").trim() === target.fileName);
+    if (!button) throw new Error(`没有找到本轮图片文件：${target.fileName}`);
+    button.click();
+    const started = Date.now();
+    while (Date.now() - started < timeout) {
+      const dialogs = [...document.querySelectorAll('[role="dialog"]')];
+      const dialog = dialogs.find((candidate) => candidate.querySelector(`img[alt="${CSS.escape(target.fileName)}"]`));
+      const image = dialog?.querySelector(`img[alt="${CSS.escape(target.fileName)}"]`);
+      const url = imageUrl(image);
+      if (url) {
+        const closeButton = [...dialog.querySelectorAll("button")].find((candidate) => {
+          const label = `${candidate.getAttribute("aria-label") || ""} ${candidate.title || ""}`;
+          return /退出全屏|关闭|exit fullscreen|close/i.test(label);
+        });
+        closeButton?.click();
+        return url;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 250));
+    }
+    throw new Error(`图片预览地址读取超时：${target.fileName}`);
+  }
+
+  function generatedImageUrlsIn(scope = document) {
+    return uniqueGeneratedImageUrls([
+      ...generatedImageNodes(scope).map(imageUrl),
+      ...generatedImageArtifacts(scope).map((artifact) => artifact.url)
+    ]);
+  }
+
   function generatedImageUrls() {
-    return uniqueGeneratedImageUrls(generatedImageNodes().map(imageUrl));
+    return generatedImageUrlsIn(document);
+  }
+
+  globalThis.TeambuildingGptProductionDebug = {
+    generatedImageUrls,
+    generatedImageArtifacts: () => generatedImageArtifacts(document).map(({ url, fileName }) => ({ url, fileName })),
+    resolveSandboxArtifactUrl
+  };
+
+  function freshGeneratedImageUrls(baselineUrls = []) {
+    const baseline = new Set(baselineUrls || []);
+    const artifactUrls = uniqueGeneratedImageUrls(
+      generatedImageArtifacts(document).map((artifact) => artifact.url)
+    ).filter((url) => !baseline.has(url));
+    // A completed ChatGPT image job can expose both transient preview images
+    // and a final P1...Pn sandbox file list. The file list is the authoritative
+    // batch: counting both would turn a real 7-page reply into 10 images.
+    if (artifactUrls.length) return artifactUrls;
+    return generatedImageUrls().filter((url) => !baseline.has(url));
   }
 
   function generatedImageCompletionEvidence(urls) {
@@ -1122,7 +1258,7 @@
     const turns = assistantTurns();
     for (let index = turns.length - 1; index >= 0; index -= 1) {
       const turn = turns[index];
-      const turnUrls = uniqueGeneratedImageUrls(generatedImageNodes(turn).map(imageUrl));
+      const turnUrls = generatedImageUrlsIn(turn);
       const matched = turnUrls.filter((url) => wanted.has(url));
       if (!matched.length) continue;
       // ChatGPT adds the native copy-reply action only after the whole
@@ -1165,7 +1301,7 @@
       const pauseReason = platformPauseReason();
       if (pauseReason) throw new Error(pauseReason);
       dismissImageComparison();
-      const urls = generatedImageUrls().filter((url) => !baseline.has(url));
+      const urls = freshGeneratedImageUrls(baselineUrls);
       const signature = urls.join("|");
       const completion = generatedImageCompletionEvidence(urls);
       const pageGenerating = generatingNow();
@@ -1177,12 +1313,17 @@
         lastSignature = signature;
       }
       const stableFor = stableSince ? Date.now() - stableSince : 0;
-      const reachedExpected = Number(expectedCount) > 0 && urls.length >= Number(expectedCount);
-      if (urls.length > previousCount && stableFor >= 3_000 && (reachedExpected || completion?.responseComplete)) {
+      const requiredCount = Math.max(
+        Math.max(0, Number(expectedCount || 0)),
+        Math.max(0, Number(completion?.declaredCount || 0))
+      );
+      const reachedExpected = requiredCount > 0 && urls.length >= requiredCount;
+      const responseQuietComplete = Boolean(completion?.responseComplete) && stableFor >= 45_000;
+      if (urls.length > previousCount && ((reachedExpected && stableFor >= 8_000) || responseQuietComplete)) {
         return {
           urls,
           confident: true,
-          evidence: reachedExpected ? "expected-count" : "assistant-response-complete",
+          evidence: reachedExpected ? "expected-and-declared-count" : "assistant-response-quiet-complete",
           completion
         };
       }
@@ -1196,7 +1337,7 @@
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
-    const urls = generatedImageUrls().filter((url) => !baseline.has(url));
+    const urls = freshGeneratedImageUrls(baselineUrls);
     return {
       urls,
       confident: false,
@@ -1216,6 +1357,32 @@
       '.result-streaming',
       '[data-testid*="streaming" i]'
     ].join(",")));
+  }
+
+  async function waitForPageIdleBeforeFreshUpload(task, timeout = 10 * 60_000) {
+    if (!generatingNow()) return true;
+    reportWorkbenchProgress(
+      task,
+      "等待上一帖完成",
+      2,
+      "当前 GPT 仍在生成上一条回复；本帖尚未上传，等待网页真正空闲"
+    );
+    const started = Date.now();
+    let idleSince = 0;
+    while (Date.now() - started < Math.max(30_000, Number(timeout || 0))) {
+      const pauseReason = platformPauseReason();
+      if (pauseReason) throw new Error(pauseReason);
+      if (!generatingNow()) {
+        if (!idleSince) idleSince = Date.now();
+        if (Date.now() - idleSince >= 3_000) return true;
+      } else {
+        idleSince = 0;
+      }
+      await new Promise((resolve) => setTimeout(resolve, 1_000));
+    }
+    const error = new Error("上一帖仍在生成，本帖没有上传；任务已暂停，避免两个素材进入同一轮回复");
+    error.code = "WEB_RESPONSE_IN_FLIGHT";
+    throw error;
   }
 
   function platformPauseReason() {
@@ -1323,7 +1490,15 @@
         stableSince = 0;
         lastSignature = signature;
       }
-      if (hasContent && (!needImages || imageCount > 0) && stableSince && Date.now() - stableSince >= 1_800) {
+      const latestFreshTurn = freshTurns.at(-1);
+      const responseComplete = Boolean(latestFreshTurn?.closest?.('[data-testid^="conversation-turn"]')?.querySelector?.([
+        '[data-testid="copy-turn-action-button"]',
+        'button[aria-label*="复制回复"]',
+        'button[aria-label*="Copy response" i]'
+      ].join(",")));
+      const stableFor = stableSince ? Date.now() - stableSince : 0;
+      if (hasContent && (!needImages || imageCount > 0) && stableSince
+        && ((responseComplete && stableFor >= 2_500) || stableFor >= 8_000)) {
         return { turns: freshTurns, imageCount };
       }
       await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -1350,8 +1525,17 @@
   }
 
   function freshImageUrls(turns) {
-    const buttons = [...new Set(turns.flatMap((turn) => [
-      ...turn.querySelectorAll(".cgpt-conversation-tree-image-download-all")
+    // ChatGPT currently renders generated sandbox files beside the inner
+    // assistant message node, inside the outer conversation-turn wrapper.
+    // Recovery is scoped to a single reply, so scan that wrapper as well as
+    // the inner message.  A document-wide fallback would risk binding images
+    // from an older reply in the same long conversation.
+    const scopes = [...new Set(turns.flatMap((turn) => {
+      const wrapper = turn?.closest?.('[data-testid^="conversation-turn"]');
+      return wrapper && wrapper !== turn ? [turn, wrapper] : [turn];
+    }).filter(Boolean))];
+    const buttons = [...new Set(scopes.flatMap((scope) => [
+      ...scope.querySelectorAll(".cgpt-conversation-tree-image-download-all")
     ]))];
     const images = buttons.flatMap((button) => {
       if (Array.isArray(button.__cgptImageDownloadImages)) return button.__cgptImageDownloadImages;
@@ -1361,8 +1545,11 @@
         || button.parentElement;
       return container ? [...container.querySelectorAll("img")] : [];
     });
-    if (!images.length) images.push(...turns.flatMap((turn) => [...turn.querySelectorAll("img")]));
-    return [...new Set(images.map(imageUrl).filter(Boolean))];
+    if (!images.length) images.push(...scopes.flatMap((scope) => [...scope.querySelectorAll("img")]));
+    return uniqueGeneratedImageUrls([
+      ...images.map(imageUrl).filter(Boolean),
+      ...scopes.flatMap((scope) => generatedImageArtifacts(scope).map((artifact) => artifact.url))
+    ]);
   }
 
   function downloadThroughExtension(url, filename, requestId, downloadRoot = "", timeout = 5 * 60_000) {
@@ -1407,6 +1594,41 @@
     });
   }
 
+  // The visible manual buttons and the automatic state machine must share the
+  // same authenticated page-fetch + workbench-save path. Browser downloads of
+  // signed ChatGPT image URLs can lose request credentials after a long reply.
+  globalThis.TeambuildingGptProductionDownload = ({ url, filename, requestId = "", downloadRoot = "" } = {}) => (
+    downloadThroughExtension(
+      String(url || ""),
+      String(filename || ""),
+      String(requestId || `manual-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`),
+      String(downloadRoot || "")
+    )
+  );
+
+  async function packageDownloadedReply(options = {}) {
+    const result = await api("/api/extension/work-package", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        clipboardText: String(options.clipboardText || ""),
+        title: String(options.title || ""),
+        conversationUrl: String(options.conversationUrl || location.href),
+        accountName: String(options.accountName || localStorage.getItem("tb-workbench-account-id") || ""),
+        batchId: String(options.batchId || ""),
+        expectedImageCount: Math.max(0, Number(options.expectedImageCount || 0)),
+        downloadRoot: String(options.downloadRoot || ""),
+        productRoot: String(options.productRoot || "")
+      })
+    });
+    if (!result?.ok) throw new Error(result?.error || "本地打包没有返回成功");
+    return result;
+  }
+
+  // Manual reply buttons and automatic production intentionally call this
+  // single package bridge.  Their only difference is who starts the action.
+  globalThis.TeambuildingGptProductionPackage = packageDownloadedReply;
+
   async function downloadFreshImages(turnsOrUrls, task) {
     reportWorkbenchProgress(task, "下载图片", 68, "正在核对本轮新生成图片");
     const urls = Array.isArray(turnsOrUrls) && turnsOrUrls.every((item) => typeof item === "string")
@@ -1416,7 +1638,7 @@
     const batchId = workPackageBatchId();
     const files = [];
     for (let index = 0; index < urls.length; index += 1) {
-      const url = urls[index];
+      const url = await resolveSandboxArtifactUrl(urls[index]);
       const extensionMatch = url.match(/\.(png|jpe?g|webp|gif|avif)(?:[?#]|$)/i);
       const extension = extensionMatch ? extensionMatch[1].toLowerCase().replace("jpeg", "jpg") : "png";
       const filename = `chatgpt-workpkg-${batchId}-${index + 1}-of-${urls.length}.${extension}`;
@@ -1546,7 +1768,7 @@
         reportWorkbenchProgress(task, "恢复迁移计划", 32, `已识别当前网页完成的 ${recoveredCount} 页计划，不重复上传素材`);
       }
     }
-    if (/等待图片|生成图片|下载图片|download/i.test(String(task.entry.retryFromStage || "")) && !workflow.planDone) {
+    if (/等待图片|生成图片|下载图片|download/i.test(String(task.entry.retryFromStage || ""))) {
       const turns = await waitFor(() => {
         const currentTurns = assistantTurns();
         return currentTurns.some((turn) => freshImageUrls([turn]).length) ? currentTurns : null;
@@ -1554,8 +1776,18 @@
       if (!turns) {
         throw new Error("恢复下载失败：等待 30 秒后仍没有找到最近一次生成图片");
       }
+      const taskExpectedImages = Math.max(0, Number(task.entry.expectedImages || 0));
       let generatedTurnIndex = -1;
+      if (taskExpectedImages) {
+        for (let index = turns.length - 1; index >= 0; index -= 1) {
+          if (freshImageUrls([turns[index]]).length === taskExpectedImages) {
+            generatedTurnIndex = index;
+            break;
+          }
+        }
+      }
       for (let index = turns.length - 1; index >= 0; index -= 1) {
+        if (generatedTurnIndex >= 0) break;
         if (freshImageUrls([turns[index]]).length) {
           generatedTurnIndex = index;
           break;
@@ -1567,7 +1799,11 @@
       workflow.planDone = true;
       workflow.imageSubmitted = true;
       workflow.beforeImagesCount = generatedTurnIndex;
-      workflow.plannedImageCount = Math.max(recoveredImageUrls.length, Number(task.entry.expectedImages || 0));
+      // A persisted checkpoint may contain a count parsed from an older plan in the
+      // same long-running conversation. During recovery the queue entry is the
+      // authoritative batch contract; fall back to the recovered reply only when
+      // that contract did not record an expected count.
+      workflow.plannedImageCount = taskExpectedImages || recoveredImageUrls.length;
       workflow.generatedImageUrls = recoveredImageUrls;
       workflow.generatedBaselineUrls = generatedImageUrls().filter((url) => !recoveredSet.has(url));
       reportWorkbenchProgress(task, "恢复下载图片", 64, `已找到当前会话最近一次 ${recoveredImageUrls.length} 张生成结果，不重复提交计划或消耗生图额度`);
@@ -1769,21 +2005,16 @@
     const packageDownloadRoot = downloadedFileDirectories.length === 1
       ? downloadedFileDirectories[0]
       : String(downloadResult.downloadRoot || options.downloadRoot || "").trim();
-    const packageResult = workflow.packageResult || await api("/api/extension/work-package", {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          clipboardText: copyText,
-          title: task.entry.name,
-          conversationUrl: location.href,
-          accountName: localStorage.getItem("tb-workbench-account-id") || "",
-          batchId: downloadResult.batchId,
-          expectedImageCount: downloadedImages,
-          downloadRoot: packageDownloadRoot,
-          productRoot: String(options.productRoot || "").trim()
-        })
-      });
-    if (!packageResult?.ok) throw new Error(packageResult?.error || "本地打包没有返回成功");
+    const packageResult = workflow.packageResult || await packageDownloadedReply({
+      clipboardText: copyText,
+      title: task.entry.name,
+      conversationUrl: location.href,
+      accountName: localStorage.getItem("tb-workbench-account-id") || "",
+      batchId: downloadResult.batchId,
+      expectedImageCount: downloadedImages,
+      downloadRoot: packageDownloadRoot,
+      productRoot: String(options.productRoot || "").trim()
+    });
     workflow.packageResult = packageResult;
     if (packageResult.duplicate) {
       reportWorkbenchProgress(
@@ -1879,6 +2110,11 @@
     const { entry } = task;
     setBusy(entry, `正在准备“${entry.name}”的文件…`);
     try {
+      if (!composer()) {
+        reportWorkbenchProgress(task, "打开在线模板", 3, "正在把分享模板续接为当前账号可编辑的对话");
+        const editable = await ensureEditableConversation();
+        if (!editable) throw new Error("在线模板当前不可编辑；请使用 ChatGPT 会话链接，或先在分享页点击“继续此对话”");
+      }
       const paths = (entry.attachments || []).slice(0, 30);
       let files = [];
       let workflowResult = null;
@@ -1894,6 +2130,10 @@
         );
         workflowResult = await runAutomaticProduction(task);
       } else {
+      await waitForPageIdleBeforeFreshUpload(
+        task,
+        Math.max(5, Number(entry.autoOptions?.taskTimeoutMinutes || 30)) * 60_000
+      );
       const usage = entry.externalRequestId ? null : await checkMaterialUsage(entry, task);
       if (usage?.record) entry.usage = usage.record;
       // A material may intentionally be reused with another template or in a

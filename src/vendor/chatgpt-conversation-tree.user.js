@@ -6261,25 +6261,44 @@
     try {
       const imageButton = button.__cgptImageDownloadButton;
       if (!imageButton) throw new Error('没有找到当前回复对应的图片下载按钮');
-      const downloadResult = await runImageDownloadShortcut(imageButton);
+      const priorDownload = imageDownloadRecordForButton(imageButton);
+      const currentTotal = Number(imageButton.dataset.cgptImageTotal || 0)
+        || uniqueImageUrls(imageButton.__cgptImageDownloadImages || []).length;
+      const canReuseDownload = Boolean(
+        priorDownload?.batchId
+        && priorDownload.state === 'downloaded'
+        && Number(priorDownload.downloaded || 0) >= currentTotal
+        && Number(priorDownload.total || 0) === currentTotal
+      );
+      const downloadResult = canReuseDownload
+        ? {
+            batchId: priorDownload.batchId,
+            downloaded: Number(priorDownload.downloaded || 0),
+            total: Number(priorDownload.total || 0),
+          }
+        : await runImageDownloadShortcut(imageButton);
+      if (canReuseDownload) showImageDownloadToast(`复用已下载图片：${downloadResult.downloaded}/${downloadResult.total}`, true);
       if (!downloadResult?.batchId || downloadResult.downloaded !== downloadResult.total) {
         throw new Error(`本组图片未完整下载：${downloadResult?.downloaded || 0}/${downloadResult?.total || 0}`);
       }
       const clipboardText = await navigator.clipboard.readText();
-      const response = await chrome.runtime.sendMessage({
-        type: 'tb-work-package',
-        baseUrl: /^http:\/\/127\.0\.0\.1:\d+$/.test(localStorage.getItem('tb-workbench-api-root') || '')
-          ? localStorage.getItem('tb-workbench-api-root')
-          : undefined,
-        body: {
-          clipboardText,
-          title: currentWorkPackageConversationTitle(),
-          conversationUrl: currentWorkPackageConversationUrl(),
-          accountName: currentWorkPackageAccountName(),
-          batchId: downloadResult.batchId,
-          expectedImageCount: downloadResult.total,
-        },
-      });
+      const packageRequest = {
+        clipboardText,
+        title: currentWorkPackageConversationTitle(),
+        conversationUrl: currentWorkPackageConversationUrl(),
+        accountName: currentWorkPackageAccountName(),
+        batchId: downloadResult.batchId,
+        expectedImageCount: downloadResult.total,
+      };
+      const response = typeof globalThis.TeambuildingGptProductionPackage === 'function'
+        ? await globalThis.TeambuildingGptProductionPackage(packageRequest)
+        : await chrome.runtime.sendMessage({
+            type: 'tb-work-package',
+            baseUrl: /^http:\/\/127\.0\.0\.1:\d+$/.test(localStorage.getItem('tb-workbench-api-root') || '')
+              ? localStorage.getItem('tb-workbench-api-root')
+              : undefined,
+            body: packageRequest,
+          });
       if (!response?.ok) {
         throw new Error(response?.error || '本地工作台未返回打包结果');
       }
@@ -6294,8 +6313,13 @@
       showImageDownloadToast('打包完成', true);
     } catch (error) {
       console.warn('[ChatGPT 作品包按钮] 工作台直接打包失败：', error);
-      window.alert(`打包失败：${error?.message || error}\n请确认团建内容工作台正在运行。`);
+      const message = `打包失败：${error?.message || error}`;
+      showImageDownloadToast(message, false);
+      document.dispatchEvent(new CustomEvent('tb-gpt-package-status', {
+        detail: { status: 'error', message, source: 'manual' }
+      }));
       setWorkPackageButtonState(button, 'idle');
+      button.title = `${message}；点击可重试`;
       return;
     }
   }
@@ -6605,41 +6629,48 @@
     return `chatgpt-image-group-${stamp}-${String(index + 1).padStart(2, '0')}.${ext}`;
   }
 
-  function gmDownload(url, name) {
-    return new Promise((resolve) => {
-      if (typeof GM_download === 'function' && !/^blob:/i.test(url)) {
-        try {
-          GM_download({
-            url,
-            name,
-            saveAs: false,
-            onload: () => resolve(true),
-            onerror: (error) => {
-              console.warn('[ChatGPT 图片下载快捷按钮] GM_download 失败，改用链接下载：', error);
-              resolve(false);
-            },
-            ontimeout: () => resolve(false),
-          });
-          return;
-        } catch (error) {
-          console.warn('[ChatGPT 图片下载快捷按钮] GM_download 调用失败，改用链接下载：', error);
-        }
+  function imageBufferToBase64(buffer) {
+    const bytes = new Uint8Array(buffer);
+    let binary = '';
+    for (let offset = 0; offset < bytes.length; offset += 0x8000) {
+      binary += String.fromCharCode(...bytes.subarray(offset, offset + 0x8000));
+    }
+    return btoa(binary);
+  }
+
+  async function gmDownload(url, name) {
+    try {
+      const imageResponse = await fetch(url, { credentials: 'include', cache: 'no-store' });
+      if (!imageResponse.ok) throw new Error(`图片读取失败：HTTP ${imageResponse.status}`);
+      const contentType = String(imageResponse.headers.get('content-type') || 'image/png');
+      if (!/^image\/(?:png|jpe?g|webp)$/i.test(contentType)) {
+        throw new Error(`图片响应类型无效：${contentType}`);
       }
-      try {
-        const anchor = document.createElement('a');
-        anchor.href = url;
-        anchor.download = name;
-        anchor.rel = 'noopener';
-        anchor.style.display = 'none';
-        document.body.append(anchor);
-        anchor.click();
-        anchor.remove();
-        resolve(true);
-      } catch (error) {
-        console.warn('[ChatGPT 图片下载快捷按钮] 链接下载失败：', error);
-        resolve(false);
+      const requestId = `manual-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+      const apiRoot = /^http:\/\/127\.0\.0\.1:\d+$/.test(localStorage.getItem('tb-workbench-api-root') || '')
+        ? localStorage.getItem('tb-workbench-api-root')
+        : 'http://127.0.0.1:4327';
+      const saveResponse = await fetch(`${apiRoot}/api/extension/save-generated-image`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          filename: name,
+          requestId,
+          contentType,
+          data: imageBufferToBase64(await imageResponse.arrayBuffer()),
+          sourceUrl: url,
+          downloadRoot: ''
+        })
+      });
+      const result = await saveResponse.json().catch(() => ({}));
+      if (!saveResponse.ok || !result?.ok || !result?.filename) {
+        throw new Error(result?.error || `工作台保存失败：HTTP ${saveResponse.status}`);
       }
-    });
+      return true;
+    } catch (error) {
+      console.warn('[ChatGPT 图片下载快捷按钮] 工作台直存失败：', error);
+      return false;
+    }
   }
 
   async function downloadUrlsConcurrently(urls, onProgress = null, concurrency = 4, batchId = '') {
@@ -7333,6 +7364,32 @@
       console.warn('[ChatGPT 图片下载快捷按钮] 安装调试入口失败：', error);
     }
   }
+
+  document.addEventListener('tb-workbench-manual-action', async () => {
+    let request = null;
+    try {
+      request = JSON.parse(document.getElementById('tb-workbench-manual-action-request')?.textContent || 'null');
+    } catch {
+      request = null;
+    }
+    if (!request?.requestId) return;
+    let result;
+    try {
+      result = await unsafeWindow.CGPTImageDownloadDebug?.manualAction(request.action);
+      if (!result) result = { ok: false, error: '网页下载工具尚未加载' };
+    } catch (error) {
+      result = { ok: false, error: error?.message || String(error) };
+    }
+    let bridge = document.getElementById('tb-workbench-manual-action-result');
+    if (!bridge) {
+      bridge = document.createElement('script');
+      bridge.id = 'tb-workbench-manual-action-result';
+      bridge.type = 'application/json';
+      document.documentElement.appendChild(bridge);
+    }
+    bridge.textContent = JSON.stringify({ requestId: request.requestId, ...result });
+    document.dispatchEvent(new Event('tb-workbench-manual-action-result'));
+  });
 
   const observer = new MutationObserver((mutations) => {
     if (document.hidden) return;
