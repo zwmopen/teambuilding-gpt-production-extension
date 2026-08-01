@@ -1546,7 +1546,7 @@
         reportWorkbenchProgress(task, "恢复迁移计划", 32, `已识别当前网页完成的 ${recoveredCount} 页计划，不重复上传素材`);
       }
     }
-    if (/下载图片|download/i.test(String(task.entry.retryFromStage || "")) && !workflow.planDone) {
+    if (/等待图片|生成图片|下载图片|download/i.test(String(task.entry.retryFromStage || "")) && !workflow.planDone) {
       const turns = await waitFor(() => {
         const currentTurns = assistantTurns();
         return currentTurns.some((turn) => freshImageUrls([turn]).length) ? currentTurns : null;
@@ -1562,10 +1562,15 @@
         }
       }
       if (generatedTurnIndex < 0) throw new Error("恢复下载失败：当前会话中没有找到最近一次生成图片");
+      const recoveredImageUrls = freshImageUrls([turns[generatedTurnIndex]]);
+      const recoveredSet = new Set(recoveredImageUrls);
       workflow.planDone = true;
       workflow.imageSubmitted = true;
       workflow.beforeImagesCount = generatedTurnIndex;
-      reportWorkbenchProgress(task, "恢复下载图片", 64, "已找到当前会话最近一次生成结果，不重复提交计划或消耗生图额度");
+      workflow.plannedImageCount = Math.max(recoveredImageUrls.length, Number(task.entry.expectedImages || 0));
+      workflow.generatedImageUrls = recoveredImageUrls;
+      workflow.generatedBaselineUrls = generatedImageUrls().filter((url) => !recoveredSet.has(url));
+      reportWorkbenchProgress(task, "恢复下载图片", 64, `已找到当前会话最近一次 ${recoveredImageUrls.length} 张生成结果，不重复提交计划或消耗生图额度`);
     }
     if (/下载图片|生成小红书文案|纠正文案|打包作品|clipboard|剪贴板/i.test(retryStage) && !workflow.copyText) {
       const latestCopyTurn = latestCopyTurnAfterPrompt(options.copyPrompt);
@@ -1664,7 +1669,7 @@
       reportWorkbenchProgress(task, "等待图片", 48, `已发送 1，正在等待本轮 ${expectedImages} 张图片生成`);
       const imageDetection = await waitForGeneratedImageGrowth(
         baselineUrls,
-        detected.length,
+        0,
         taskTimeout,
         expectedImages
       );

@@ -96,6 +96,8 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /本素材已跳过，未自动重写或发送 1/);
   assert.match(source, /baseUrl:\s*currentApiRoot\(\)/);
   assert.match(source, /恢复下载图片/);
+  assert.match(source, /等待图片\|生成图片\|下载图片\|download/);
+  assert.match(source, /workflow\.generatedBaselineUrls = generatedImageUrls\(\)\.filter/);
   assert.match(source, /task\.workflow\?\.planSubmitted \|\| entry\.retryFromStage/);
   assert.match(source, /resumeOnly/);
   assert.match(source, /\/api\/extension\/save-generated-image/);
