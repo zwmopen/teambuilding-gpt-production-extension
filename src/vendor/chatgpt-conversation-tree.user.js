@@ -1,7 +1,7 @@
 // ==UserScript==
 // @name         ChatGPT 最近对话分组（飞书式目录）
 // @namespace    https://chatgpt.com/
-// @version      1.12.4
+// @version      1.12.5
 // @description  把可拖动、可嵌套的对话分组原生融入 ChatGPT"最近"列表，并给图片组增加外置下载全部快捷按钮，支持一键下载本轮所有图片。
 // @author       Codex
 // @match        https://chatgpt.com/*
@@ -25,7 +25,7 @@
   'use strict';
 
   const APP_ID = 'cgpt-conversation-tree';
-  const SCRIPT_VERSION = '1.12.4';
+  const SCRIPT_VERSION = '1.12.5';
   const HEADER_ID = `${APP_ID}-header-actions`;
   const MENU_ID = `${APP_ID}-menu`;
   const STYLE_ID = `${APP_ID}-style`;
@@ -43,6 +43,8 @@
   const TEXT_DOWNLOAD_SLOT_CLASS = `${APP_ID}-text-download-slot`;
   const WORK_PACKAGE_CLASS = `${APP_ID}-work-package`;
   const IMAGE_DOWNLOAD_TOAST_ID = `${APP_ID}-image-download-toast`;
+  const IMAGE_DOWNLOAD_HISTORY_KEY = `${APP_ID}:image-download-history:v1`;
+  const IMAGE_DOWNLOAD_HISTORY_LIMIT = 240;
   const WORK_PACKAGE_PROTOCOL_URL = 'cgpt-workpkg://run';
   const WORK_PACKAGE_TITLE_MARKER = 'WORKPKG_GPT_TITLE_B64:';
   const WORK_PACKAGE_METADATA_MARKER = 'WORKPKG_GPT_META_B64:';
@@ -1854,6 +1856,26 @@
       .${IMAGE_DOWNLOAD_SLOT_CLASS}.cgpt-image-download-fallback {
         display: flex;
         margin: 7px 0 2px;
+      }
+      .cgpt-image-download-marker {
+        display: inline-flex;
+        align-items: center;
+        min-height: 24px;
+        padding: 0 8px;
+        border: 1px solid color-mix(in srgb, #16a34a 28%, transparent);
+        border-radius: 999px;
+        color: #15803d;
+        background: color-mix(in srgb, #16a34a 9%, transparent);
+        font-size: 12px;
+        font-weight: 650;
+        line-height: 1;
+        white-space: nowrap;
+        font-variant-numeric: tabular-nums;
+      }
+      .cgpt-image-download-marker[data-state="packaged"] {
+        color: #1d4ed8;
+        border-color: color-mix(in srgb, #2563eb 28%, transparent);
+        background: color-mix(in srgb, #2563eb 9%, transparent);
       }
       .${TEXT_DOWNLOAD_SLOT_CLASS} {
         display: inline-flex;
@@ -5766,6 +5788,156 @@
     return urls;
   }
 
+  function canonicalDownloadImageUrl(value = '') {
+    const raw = String(value || '').trim();
+    if (!raw) return '';
+    try {
+      const parsed = new URL(raw, location.href);
+      return `${parsed.origin}${parsed.pathname}`;
+    } catch {
+      return raw.split(/[?#]/, 1)[0];
+    }
+  }
+
+  function imageDownloadFingerprint(urls = []) {
+    const stableUrls = [...new Set((urls || []).map(canonicalDownloadImageUrl).filter(Boolean))].sort();
+    if (!stableUrls.length) return '';
+    let hash = 5381;
+    const source = stableUrls.join('\n');
+    for (let index = 0; index < source.length; index += 1) {
+      hash = ((hash << 5) + hash) ^ source.charCodeAt(index);
+    }
+    return `${stableUrls.length}-${(hash >>> 0).toString(36)}`;
+  }
+
+  function imageDownloadHistoryKey(urls = []) {
+    const fingerprint = imageDownloadFingerprint(urls);
+    return fingerprint ? `${location.pathname}|${fingerprint}` : '';
+  }
+
+  function loadImageDownloadHistory() {
+    try {
+      const parsed = JSON.parse(localStorage.getItem(IMAGE_DOWNLOAD_HISTORY_KEY) || '{}');
+      return parsed && typeof parsed === 'object' && !Array.isArray(parsed) ? parsed : {};
+    } catch {
+      return {};
+    }
+  }
+
+  function saveImageDownloadHistory(history) {
+    try {
+      const entries = Object.entries(history || {})
+        .sort((left, right) => String(right[1]?.downloadedAt || '').localeCompare(String(left[1]?.downloadedAt || '')))
+        .slice(0, IMAGE_DOWNLOAD_HISTORY_LIMIT);
+      localStorage.setItem(IMAGE_DOWNLOAD_HISTORY_KEY, JSON.stringify(Object.fromEntries(entries)));
+    } catch {
+      // 下载记录只是可视状态；存储失败不能影响真实文件落盘。
+    }
+  }
+
+  function ensureImageDownloadMarker(slot) {
+    if (!slot) return null;
+    let marker = slot.querySelector('.cgpt-image-download-marker');
+    if (!marker) {
+      marker = document.createElement('span');
+      marker.className = 'cgpt-image-download-marker';
+      marker.hidden = true;
+      marker.setAttribute('role', 'status');
+      marker.setAttribute('aria-live', 'polite');
+      slot.append(marker);
+    }
+    return marker;
+  }
+
+  function renderImageDownloadRecord(button, record = null) {
+    const slot = button?.closest?.(`.${IMAGE_DOWNLOAD_SLOT_CLASS}`);
+    const marker = ensureImageDownloadMarker(slot);
+    if (!button || !marker || !record) {
+      if (marker) marker.hidden = true;
+      return;
+    }
+    const downloaded = Math.max(0, Number(record.downloaded || 0));
+    const total = Math.max(downloaded, Number(record.total || 0));
+    const packaged = record.state === 'packaged';
+    marker.hidden = downloaded <= 0;
+    marker.dataset.state = packaged ? 'packaged' : 'downloaded';
+    marker.textContent = `${packaged ? '已打包' : '已下载'} ${downloaded}/${total || downloaded}`;
+    marker.title = `${packaged ? '本作品已完成打包' : '本作品已下载'}${record.downloadedAt ? ` · ${new Date(record.downloadedAt).toLocaleString()}` : ''}`;
+    button.dataset.cgptImageDownloaded = String(downloaded);
+    if (total) button.dataset.cgptImageTotal = String(total);
+    if (!button.disabled) setImageButtonProgress(button, downloaded, total || downloaded, false);
+  }
+
+  function imageDownloadRecordForButton(button) {
+    if (!button) return null;
+    const container = button.__cgptImageDownloadContainer
+      || button.closest?.('[data-cgpt-image-download-container]');
+    const images = Array.isArray(button.__cgptImageDownloadImages)
+      ? button.__cgptImageDownloadImages
+      : groupImageElements(container || document);
+    const urls = uniqueImageUrls(images);
+    const key = imageDownloadHistoryKey(urls);
+    return key ? loadImageDownloadHistory()[key] || null : null;
+  }
+
+  function rememberImageDownload(button, downloaded, total, batchId = '', state = 'downloaded', explicitUrls = []) {
+    const container = button?.__cgptImageDownloadContainer
+      || button?.closest?.('[data-cgpt-image-download-container]');
+    const images = Array.isArray(button?.__cgptImageDownloadImages)
+      ? button.__cgptImageDownloadImages
+      : groupImageElements(container || document);
+    const urls = explicitUrls.length ? explicitUrls : uniqueImageUrls(images);
+    const key = imageDownloadHistoryKey(urls);
+    if (!key) return null;
+    const history = loadImageDownloadHistory();
+    const record = {
+      downloaded: Math.max(0, Number(downloaded || 0)),
+      total: Math.max(Number(downloaded || 0), Number(total || 0)),
+      batchId: String(batchId || ''),
+      state: state === 'packaged' ? 'packaged' : 'downloaded',
+      downloadedAt: new Date().toISOString(),
+    };
+    history[key] = record;
+    saveImageDownloadHistory(history);
+    if (button) renderImageDownloadRecord(button, record);
+    return record;
+  }
+
+  function markImageGroupDownloadedByUrls(detail = {}) {
+    const urls = [...new Set((detail.urls || []).map(String).filter(Boolean))];
+    if (!urls.length) return false;
+    refreshImageDownloadButtons();
+    const wanted = new Set(urls.map(canonicalDownloadImageUrl).filter(Boolean));
+    const buttons = [...document.querySelectorAll(`.${IMAGE_DOWNLOAD_CLASS}`)];
+    const button = buttons.find((candidate) => {
+      const container = candidate.__cgptImageDownloadContainer
+        || candidate.closest?.('[data-cgpt-image-download-container]');
+      const images = Array.isArray(candidate.__cgptImageDownloadImages)
+        ? candidate.__cgptImageDownloadImages
+        : groupImageElements(container || document);
+      const current = new Set(uniqueImageUrls(images).map(canonicalDownloadImageUrl).filter(Boolean));
+      return current.size > 0 && [...wanted].every((url) => current.has(url));
+    }) || null;
+    const downloaded = Math.max(0, Number(detail.downloaded || urls.length));
+    const total = Math.max(downloaded, Number(detail.total || urls.length));
+    if (button) {
+      rememberImageDownload(button, downloaded, total, detail.batchId, detail.state, urls);
+      return true;
+    }
+    const key = imageDownloadHistoryKey(urls);
+    if (!key) return false;
+    const history = loadImageDownloadHistory();
+    history[key] = {
+      downloaded,
+      total,
+      batchId: String(detail.batchId || ''),
+      state: detail.state === 'packaged' ? 'packaged' : 'downloaded',
+      downloadedAt: new Date().toISOString(),
+    };
+    saveImageDownloadHistory(history);
+    return true;
+  }
+
   // ChatGPT keeps the non-selected items of an image carousel mounted but
   // hidden (and sometimes at 0x0). They still carry the real image URL and
   // belong to the same downloadable group, so visibility must not decide
@@ -6113,10 +6285,12 @@
       }
       if (response.duplicate) {
         setWorkPackageButtonState(button, 'duplicate');
+        rememberImageDownload(imageButton, downloadResult.downloaded, downloadResult.total, downloadResult.batchId, 'downloaded');
         showImageDownloadToast(`历史图片组已存在，已清理 ${Number(response.deletedImages || 0)} 张暂存图`, true);
         return;
       }
       setWorkPackageButtonState(button, 'done');
+      rememberImageDownload(imageButton, downloadResult.downloaded, downloadResult.total, downloadResult.batchId, 'packaged');
       showImageDownloadToast('打包完成', true);
     } catch (error) {
       console.warn('[ChatGPT 作品包按钮] 工作台直接打包失败：', error);
@@ -6231,6 +6405,8 @@
       button.classList.toggle('cgpt-image-download-done', done);
       if (downloaded) setImageButtonProgress(button, downloaded, totalCount, false);
     }
+    const savedDownload = imageDownloadRecordForButton(button);
+    if (savedDownload) renderImageDownloadRecord(button, savedDownload);
   }
 
   function refreshImageDownloadButtons() {
@@ -6640,8 +6816,10 @@
       if (!downloaded) {
         window.alert('\u4e0b\u8f7d\u5931\u8d25\u4e86\uff0c\u53ef\u80fd\u662f\u7f51\u7edc\u95ee\u9898\u6216\u8005\u56fe\u7247\u5730\u5740\u53d8\u4e86\u3002\u6253\u5f00\u63a7\u5236\u53f0\u53ef\u4ee5\u770b\u5230\u8be6\u7ec6\u65e5\u5fd7\u3002');
       } else if (totalImages && downloaded >= totalImages) {
+        rememberImageDownload(button, downloaded, totalImages, batchId, 'downloaded');
         showImageDownloadToast(`图片下载完成：${downloaded}/${totalImages}`, true);
       } else {
+        rememberImageDownload(button, downloaded, totalImages, batchId, 'downloaded');
         showImageDownloadToast(`图片下载完成：${downloaded}/${totalImages || downloaded}，有图片未成功`, false);
       }
     } catch (error) {
@@ -7207,6 +7385,10 @@
     scheduleScan();
     scheduleImageDownloadButtons();
     schedulePromptButton(80);
+  });
+  document.addEventListener('tb-gpt-image-download-complete', (event) => {
+    markImageGroupDownloadedByUrls(event?.detail || {});
+    scheduleImageDownloadButtons(40);
   });
   let previousUrl = location.href;
   window.setInterval(() => {

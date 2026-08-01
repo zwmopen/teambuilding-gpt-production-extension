@@ -1,5 +1,20 @@
 # 交接
 
+## 0.2.17 当前事实（2026-08-01）
+
+- 自动上传的最小安全单元是一个帖子文件夹。`assertSinglePostAttachmentBoundary` 拒绝跨帖子文件，`attachmentPreviewCount` 仅扫描当前 composer。
+- GPT 输入框中的未发送附件和未发送草稿都会跨刷新保留，因此两者都是硬门禁：分别返回 `COMPOSER_ATTACHMENTS_PENDING` 与 `COMPOSER_DRAFT_PENDING`，由工作台持久暂停整批并保留当前索引。
+- 已经发送的聊天记录不参与门禁；不得通过清理 Chromium 数据、登录分区或历史会话来解决输入框残留。
+- `runAutomaticProduction` 内部定义 `noPromptMode`，避免第一帖上传完成后因作用域错误异常退出并污染 composer。
+- 自动化测试 18/18 与语法检查通过；工作台热重启后真实页面报告扩展 `0.2.17` 已就绪，原登录和会话保留，composer 草稿为空、未发送附件为 0。真实 Plus 失败路径验证了 6 页计划、单次 `1`、仅 1 张图后停止且第二帖未上传；完整成功路径需在真实生图额度恢复后继续验证。
+
+## 0.2.16 当前事实（2026-08-01）
+
+- 自动生产不点击网页可视按钮：`sidebar.js` 直接调用同一批次下载器，在 Electron 内置模式交给工作台保存接口，在普通扩展模式交给 `chrome.downloads.download`。手动按钮只是同一底层能力的可视入口。
+- 自动和手动下载完成后都向对应助手图片回复写入 `已下载 x/x`；工作包成功后升级为 `已打包 x/x`。记录按会话路径和图片 URL 稳定指纹保存在本地，回复重新挂载时恢复。
+- 用户上传素材仍由 `isAssistantGeneratedImage` 排除，不显示下载、打包或已使用标记。
+- 版本 0.2.16 增加下载状态回归测试；发布前需同步到工作台内置快照。
+
 ## 0.2.14 当前事实（2026-08-01）
 
 - 源码真源仍为本仓库 `src/`；工作台 `integrations/gpt-production-extension` 只是机械同步快照。

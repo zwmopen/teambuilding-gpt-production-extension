@@ -40,7 +40,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.15");
+  assert.equal(manifest.version, "0.2.17");
 });
 
 test("GPT web controls stay visible and place prompt panel inside viewport", () => {
@@ -301,6 +301,21 @@ test("manual production can invoke visible download, package and text actions", 
   assert.match(vendor, /refreshImageDownloadButtons\(\)/);
 });
 
+test("manual and automatic downloads persist a reply-bound used marker", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  assert.match(source, /tb-gpt-image-download-complete/);
+  assert.match(source, /source:\s*"automatic"/);
+  assert.match(vendor, /IMAGE_DOWNLOAD_HISTORY_KEY/);
+  assert.match(vendor, /function rememberImageDownload\(/);
+  assert.match(vendor, /function markImageGroupDownloadedByUrls\(/);
+  assert.match(vendor, /cgpt-image-download-marker/);
+  assert.match(vendor, /已下载.*\$\{downloaded\}\/\$\{total \|\| downloaded\}/);
+  assert.match(vendor, /document\.addEventListener\('tb-gpt-image-download-complete'/);
+  assert.match(vendor, /rememberImageDownload\(button, downloaded, totalImages, batchId, 'downloaded'\)/);
+  assert.match(vendor, /rememberImageDownload\(imageButton, downloadResult\.downloaded, downloadResult\.total, downloadResult\.batchId, 'packaged'\)/);
+});
+
 test("automatic copy waits for streaming to finish before packaging", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const start = source.indexOf("async function waitForPublishCopy");
@@ -319,4 +334,34 @@ test("resume after a pre-bridge pause forces the material upload instead of skip
   assert.match(source, /const resumeOnly = Boolean\(retryFromStage\) && !forceUpload/);
   assert.match(source, /const resumeExistingWorkflow = !entry\.forceUpload/);
   assert.match(source, /retryTask\.entry\.forceUpload = forceUpload/);
+});
+
+test("one material task cannot stack another post into the current GPT composer", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const previewStart = source.indexOf("function attachmentPreviewCount");
+  const previewEnd = source.indexOf("function normalizeLocalAttachmentPath", previewStart);
+  const previewSource = source.slice(previewStart, previewEnd);
+  assert.ok(previewStart > -1 && previewEnd > previewStart);
+  assert.match(previewSource, /target\?\.closest\("form"\)/);
+  assert.doesNotMatch(previewSource, /document\.querySelector\("main"\)/);
+  assert.match(source, /function assertSinglePostAttachmentBoundary\(/);
+  assert.match(source, /normalized\.startsWith\(prefix\)/);
+  assert.match(source, /assertSinglePostAttachmentBoundary\(entry, paths\)/);
+  assert.match(source, /const existingComposerAttachments = attachmentPreviewCount\(\)/);
+  assert.match(source, /if \(existingComposerAttachments > 0\)/);
+  assert.match(source, /function composerDraftText\(/);
+  assert.match(source, /productionBoundaryError\("COMPOSER_DRAFT_PENDING"/);
+  assert.match(source, /productionBoundaryError\("MIXED_POST_ATTACHMENTS"/);
+  assert.match(source, /productionBoundaryError\("COMPOSER_ATTACHMENTS_PENDING"/);
+  assert.match(source, /const errorCode = String\(error\?\.code/);
+  assert.match(source, /const pendingComposerAttachments = attachmentPreviewCount\(\)/);
+});
+
+test("automatic production derives no-prompt mode inside the workflow scope", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const start = source.indexOf("async function runAutomaticProduction");
+  const end = source.indexOf("function findEntry", start);
+  const workflow = source.slice(start, end);
+  assert.match(workflow, /const noPromptMode = options\.mode === "random"/);
+  assert.match(workflow, /if \(noPromptMode && !workflow\.planDone\)/);
 });

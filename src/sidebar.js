@@ -758,7 +758,10 @@
   }
 
   function attachmentPreviewCount() {
-    const scope = document.querySelector("main");
+    const target = composer();
+    const scope = target?.closest("form")
+      || target?.closest('[data-testid*="composer"]')
+      || target?.parentElement;
     if (!scope) return 0;
     const previews = new Set([
       ...scope.querySelectorAll('[data-testid*="attachment"]'),
@@ -772,6 +775,36 @@
         || className.includes("file-tile")
         || /\.(?:png|jpe?g|webp|gif|bmp|txt|md|pdf|docx?|xlsx?)$/i.test(label);
     }).length;
+  }
+
+  function normalizeLocalAttachmentPath(value = "") {
+    return String(value || "").trim().replace(/\//g, "\\").replace(/\\+$/, "").toLowerCase();
+  }
+
+  function composerDraftText() {
+    const target = composer();
+    if (!target) return "";
+    return String(target.value ?? target.innerText ?? target.textContent ?? "").trim();
+  }
+
+  function productionBoundaryError(code, message) {
+    const error = new Error(message);
+    error.code = code;
+    return error;
+  }
+
+  function assertSinglePostAttachmentBoundary(entry, paths = []) {
+    if (entry?.taskType !== "material" && entry?.entryKind !== "material") return;
+    const materialRoot = normalizeLocalAttachmentPath(entry.materialPath || entry.path);
+    if (!materialRoot) throw productionBoundaryError("MATERIAL_ROOT_MISSING", "当前素材任务缺少帖子文件夹路径，已阻止上传");
+    const prefix = `${materialRoot}\\`;
+    const outside = paths.filter((filePath) => {
+      const normalized = normalizeLocalAttachmentPath(filePath);
+      return normalized !== materialRoot && !normalized.startsWith(prefix);
+    });
+    if (outside.length) {
+      throw productionBoundaryError("MIXED_POST_ATTACHMENTS", `检测到 ${outside.length} 个文件不属于当前帖子文件夹，已阻止混合上传`);
+    }
   }
 
   async function loadFiles(paths, task) {
@@ -1343,6 +1376,16 @@
       files.push(await downloadThroughExtension(url, filename, requestId, String(task.entry.autoOptions?.downloadRoot || "")));
     }
     if (files.length !== urls.length) throw new Error(`图片下载不完整：${files.length}/${urls.length}`);
+    document.dispatchEvent(new CustomEvent("tb-gpt-image-download-complete", {
+      detail: {
+        urls,
+        downloaded: files.length,
+        total: Math.max(files.length, Number(task?.workflow?.plannedImageCount || 0)),
+        batchId,
+        state: "downloaded",
+        source: "automatic"
+      }
+    }));
     return { count: files.length, batchId, files };
   }
 
@@ -1359,6 +1402,7 @@
 
   async function runAutomaticProduction(task) {
     const options = task.entry.autoOptions || {};
+    const noPromptMode = options.mode === "random";
     const taskTimeout = Math.max(5, Number(options.taskTimeoutMinutes || 30)) * 60_000;
     const workflow = task.workflow || (task.workflow = {});
     const retryStage = String(task.entry.retryFromStage || "");
@@ -1673,6 +1717,16 @@
       };
     }
     await saveCheckpoint("作品打包完成", 96);
+    document.dispatchEvent(new CustomEvent("tb-gpt-image-download-complete", {
+      detail: {
+        urls: Array.isArray(workflow.generatedImageUrls) ? workflow.generatedImageUrls : [],
+        downloaded: downloadedImages,
+        total: Math.max(downloadedImages, Number(workflow.plannedImageCount || 0)),
+        batchId: downloadResult.batchId,
+        state: "packaged",
+        source: "automatic"
+      }
+    }));
     reportWorkbenchProgress(task, "完成", 100, `已打包 ${downloadedImages} 张图片和小红书文案`);
     let archiveResult = null;
     // Material rows from the local tree carry `entryKind` and `path`; bridge
@@ -1760,6 +1814,15 @@
       // later production round. Text/usage history is therefore informative,
       // not a production blocker. The authoritative duplicate decision is the
       // downloaded output image-set hash inside make_work_package.ps1.
+      assertSinglePostAttachmentBoundary(entry, paths);
+      const existingComposerAttachments = attachmentPreviewCount();
+      if (existingComposerAttachments > 0) {
+        throw productionBoundaryError("COMPOSER_ATTACHMENTS_PENDING", `当前 GPT 输入框仍有 ${existingComposerAttachments} 个未发送附件；已阻止下一帖继续叠加`);
+      }
+      const existingComposerDraft = composerDraftText();
+      if (existingComposerDraft) {
+        throw productionBoundaryError("COMPOSER_DRAFT_PENDING", "当前 GPT 输入框仍有未发送文字；已阻止下一帖重复粘贴提示词");
+      }
       const loaded = await Promise.all([loadFiles(paths, task), findFileInput()]);
       files = loaded[0];
       const input = loaded[1];
@@ -1831,7 +1894,11 @@
         setStatus(`已取消：${entry.name}`);
       } else {
         task.status = "failed";
+        const pendingComposerAttachments = attachmentPreviewCount();
+        const errorCode = String(error?.code || (pendingComposerAttachments > 0 ? "COMPOSER_ATTACHMENTS_PENDING" : ""));
         reportWorkbenchTask(task, "failed", error.message || "upload failed", {
+          errorCode,
+          pendingComposerAttachments,
           stage: task.lastStage || "",
           percent: Number(task.lastPercent || 0)
         });
