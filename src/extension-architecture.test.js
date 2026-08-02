@@ -520,14 +520,14 @@ test("automatic workflow clears residual composer drafts before each control tur
   }
 });
 
-test("automatic production derives no-prompt mode inside the workflow scope", () => {
+test("current-session production reuses master rules but never an old material plan", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const start = source.indexOf("async function runAutomaticProduction");
   const end = source.indexOf("function findEntry", start);
   const workflow = source.slice(start, end);
-  assert.match(workflow, /const noPromptMode = \(options\.useCurrentSession !== false/);
   assert.match(workflow, /conversationStateSnapshot\(\)/);
-  assert.match(workflow, /if \(noPromptMode && !workflow\.planDone\)/);
+  assert.doesNotMatch(workflow, /if \(noPromptMode && !workflow\.planDone\)/);
+  assert.match(workflow, /workflow\.planSubmitted = true;\s*await submitComposer\(\)/);
 });
 
 test("online share templates are continued into an editable conversation before upload", () => {
@@ -555,4 +555,58 @@ test("composer boundary failure pauses the extension queue before the next post"
     assert.match(text, /state\.boundaryPaused && !retryOf/);
     assert.match(text, /if \(retryOf\) state\.boundaryPaused = false/);
   }
+});
+
+test("current-session tasks may omit a custom prompt and use the built-in material instruction", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /const noPromptMode = taskOptions\.useCurrentSession !== false \|\| taskOptions\.mode === "random"/);
+  assert.match(source, /if \(entry\.customPrompt\) return String\(entry\.customPrompt\)/);
+});
+
+test("a paused composer returns a stable error code that the workbench can safely retry", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /state\.boundaryPaused && !retryOf/);
+  assert.match(source, /errorCode: "COMPOSER_ATTACHMENT_CONFLICT"/);
+});
+
+test("embedded ChatGPT uses the extension background bridge for localhost files", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const embedded = fs.readFileSync(path.join(root, "..", "..", "teambuilding-workflow-dashboard", "src", "integrations", "gpt-production-extension", "sidebar.js"), "utf8");
+  for (const text of [source, embedded]) {
+    assert.match(text, /function canUseExtensionBridge\(\)/);
+    assert.match(text, /if \(!canUseExtensionBridge\(\)\) \{\s*const result = await directLocalRequest/);
+    assert.match(text, /chrome\.runtime\.sendMessage/);
+  }
+});
+
+test("an explicit retry may discard only a stopped stale boundary before fresh upload", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const embedded = fs.readFileSync(path.join(root, "..", "..", "teambuilding-workflow-dashboard", "src", "integrations", "gpt-production-extension", "sidebar.js"), "utf8");
+  for (const text of [source, embedded]) {
+    assert.match(text, /!matchesCurrentTask && !entry\.forceUpload/);
+    assert.match(text, /!matchesCurrentTask && entry\.forceUpload/);
+    assert.match(text, /!workflowResult && !entry\.forceUpload/);
+    assert.match(text, /跳过旧失败帖/);
+  }
+});
+
+test("retry replaces the failed queue entry with the current selected post payload", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /retryTask\.entry\.materialPath = String\(message\.materialPath/);
+  assert.match(source, /retryTask\.entry\.attachments = attachments/);
+  assert.match(source, /retryTask\.entry\.customPrompt = prompt/);
+  assert.match(source, /retryTask\.entry\.expectedImages = Math\.max/);
+});
+
+test("the built-in current-session instruction is recognized as an automation draft", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /请按当前对话已经确定的母版和网页脚本处理这份团建内容/);
+  assert.match(source, /本地文件夹：/);
+});
+
+test("automatic submission waits for every native attachment tile and the real send button", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /button\[aria-label\*="移除文件"\]/);
+  assert.match(source, /attachmentPreviewCount\(\) >= expectedAttachmentCount && Boolean\(sendButton\(\)\)/);
+  assert.match(source, /ATTACHMENT_UPLOAD_NOT_READY/);
 });

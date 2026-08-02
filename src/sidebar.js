@@ -108,6 +108,10 @@
     return /^http:\/\/127\.0\.0\.1:\d+$/.test(candidate) ? candidate : DEFAULT_API_ROOT;
   }
 
+  function canUseExtensionBridge() {
+    return Boolean(globalThis.chrome?.runtime?.id && typeof globalThis.chrome.runtime.sendMessage === "function");
+  }
+
   const escapeHtml = (value) => String(value ?? "").replace(/[&<>"']/g, (char) => ({
     "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
   }[char]));
@@ -137,7 +141,11 @@
   }
 
   async function api(pathname, options = {}) {
-    if (isEmbeddedWorkbench()) {
+    // ChatGPT wraps/filters page-world fetch, and Chromium may also apply
+    // private-network checks to https://chatgpt.com -> localhost. A loaded
+    // extension has host permissions and is the stable transport even when
+    // the page is embedded in Electron; direct fetch is only a fallback.
+    if (!canUseExtensionBridge()) {
       const result = await directLocalRequest(pathname, options);
       return result.data;
     }
@@ -153,7 +161,7 @@
   }
 
   async function readLocalFile(filePath, responseType = "base64", signal = null) {
-    if (isEmbeddedWorkbench()) {
+    if (!canUseExtensionBridge()) {
       return directLocalRequest(`/file?path=${encodeURIComponent(filePath)}`, {}, responseType, signal);
     }
     if (signal?.aborted) throw new DOMException("上传已取消", "AbortError");
@@ -868,13 +876,13 @@
     if (!scope) return 0;
     const previews = new Set([
       ...scope.querySelectorAll('[data-testid*="attachment"]'),
-      ...scope.querySelectorAll('button[aria-label*="Remove attachment"], button[aria-label*="移除附件"]'),
+      ...scope.querySelectorAll('button[aria-label*="Remove attachment"], button[aria-label*="移除附件"], button[aria-label*="移除文件"]'),
       ...scope.querySelectorAll('[role="group"][aria-label]')
     ]);
     return [...previews].filter((node) => {
       const label = String(node.getAttribute?.("aria-label") || "");
       const className = String(node.className || "");
-      return /attachment|附件|移除附件|remove attachment/i.test(label)
+      return /attachment|附件|移除附件|移除文件|remove attachment/i.test(label)
         || className.includes("file-tile")
         || /\.(?:png|jpe?g|webp|gif|bmp|txt|md|pdf|docx?|xlsx?)$/i.test(label);
     }).length;
@@ -956,7 +964,7 @@
     // A previous workbench task can leave its prompt in the ProseMirror
     // editor after a reload. Clear only our unmistakable workflow envelope;
     // arbitrary user text remains a hard queue boundary.
-    return /(?:当前素材文件夹|本次附件全部是待迁移素材|请读取全部附件|继续使用当前 GPT 会话里已经沉淀好的母版环境|给我一份小红书文案)/.test(current);
+    return /(?:请按当前对话已经确定的母版和网页脚本处理这份团建内容|本地文件夹：|当前素材文件夹|本次附件全部是待迁移素材|请读取全部附件|继续使用当前 GPT 会话里已经沉淀好的母版环境|给我一份小红书文案)/.test(current);
   }
 
   function latestAutomationMaterialPrompt() {
@@ -2075,13 +2083,6 @@
 
   async function runAutomaticProduction(task) {
     const options = task.entry.autoOptions || {};
-    // The configured mode decides whether the current GPT conversation is the
-    // template source.  Older builds called this "random"; keep that alias
-    // compatible, but make the explicit per-mode setting authoritative.
-    const noPromptMode = (options.useCurrentSession !== false
-      && !task.entry.templateId
-      && task.entry.taskType !== "template-init")
-      || options.mode === "random";
     const taskTimeout = Math.max(5, Number(options.taskTimeoutMinutes || 30)) * 60_000;
     const workflow = task.workflow || (task.workflow = {});
     const stateSnapshot = conversationStateSnapshot();
@@ -2237,18 +2238,10 @@
     const initialAssistantKeys = workflow.initialAssistantKeys ?? assistantTurnKeys();
     workflow.initialAssistantKeys = initialAssistantKeys;
     const templateInitialization = task.entry.taskType === "template-init";
-    // Current-session random mode reuses the plan already present in the
-    // conversation instead of injecting another migration prompt.
-    if (noPromptMode && !workflow.planDone) {
-      const existingPlanText = assistantTurns().map(cleanAssistantText).join("\n").trim();
-      const existingPlanCount = parsePlannedImageCount(existingPlanText);
-      if (existingPlanCount && /迁移计划|逐页|P\s*1|第\s*1\s*页/i.test(existingPlanText)) {
-        workflow.planDone = true;
-        workflow.planText = existingPlanText;
-        workflow.plannedImageCount = existingPlanCount;
-        await saveCheckpoint("复用当前会话母版计划", 32);
-      }
-    }
+    // Reusing the current conversation means reusing its established master
+    // rules, never reusing an old material's migration plan. Every fresh post
+    // must submit its own attachments/instruction and receive a new assistant
+    // plan before the workflow is allowed to send the confirmation text.
     if (!workflow.planDone) {
       if (!workflow.planSubmitted) {
         reportWorkbenchProgress(
@@ -2257,6 +2250,18 @@
           18,
           templateInitialization ? "模板附件完成，正在建立当前会话的母版规则" : "附件完成，正在发送母版迁移要求"
         );
+        const expectedAttachmentCount = Array.isArray(task.entry.attachments) ? task.entry.attachments.length : 0;
+        if (expectedAttachmentCount) {
+          reportWorkbenchProgress(task, "等待附件就绪", 16, `已选择 ${expectedAttachmentCount} 个文件，等待 GPT 原生发送按钮可用`);
+          const attachmentsReady = await waitFor(
+            () => attachmentPreviewCount() >= expectedAttachmentCount && Boolean(sendButton()),
+            Math.min(taskTimeout, 3 * 60_000)
+          );
+          if (!attachmentsReady) {
+            throw productionBoundaryError("ATTACHMENT_UPLOAD_NOT_READY", `GPT 附件尚未全部就绪：${attachmentPreviewCount()}/${expectedAttachmentCount}；保留当前帖子等待重试`);
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1_500));
+        }
         workflow.planSubmitted = true;
         await submitComposer();
         clearComposerDraft();
@@ -2633,8 +2638,16 @@
         const boundarySnapshot = currentAutomationBoundarySnapshot();
         if (boundarySnapshot) {
           const matchesCurrentTask = automationPromptMatchesEntry(boundarySnapshot.materialText, entry);
-          if (!matchesCurrentTask) {
+          if (!matchesCurrentTask && !entry.forceUpload) {
             throw productionBoundaryError("WINDOW_STAGE_PENDING", "当前 GPT 窗口上一帖尚未完成文案 TXT、图片打包和归档，已阻止下一帖注入");
+          }
+          if (!matchesCurrentTask && entry.forceUpload) {
+            // The operator explicitly retried this selected post after a
+            // stopped/failed boundary. The page-idle and empty-composer gates
+            // above have already proved that no response is still running, so
+            // discard only the stale workflow marker and upload this post.
+            task.workflow = {};
+            reportWorkbenchProgress(task, "跳过旧失败帖", 4, "上一帖已停止且未完成；按用户重试指令从当前选中素材重新开始");
           }
           if (!entry.forceUpload) {
             task.workflow = task.workflow || {};
@@ -2653,7 +2666,7 @@
             workflowResult = await runAutomaticProduction(task);
           }
         }
-        if (!workflowResult) {
+        if (!workflowResult && !entry.forceUpload) {
           const pendingRemote = await findPendingRemoteProduction();
           if (pendingRemote) {
             throw productionBoundaryError("WINDOW_STAGE_PENDING", "当前 GPT 窗口仍有上一帖的图片或文案未完成打包，已阻止下一帖注入");
@@ -2745,7 +2758,9 @@
       } else {
         task.status = "failed";
         const pendingComposerAttachments = attachmentPreviewCount();
-        const errorCode = String(error?.code || (pendingComposerAttachments > 0 ? "COMPOSER_ATTACHMENTS_PENDING" : ""));
+        const errorCode = String(error?.code
+          || (/Failed to fetch|本地工作台连接失败/i.test(String(error?.message || "")) ? "LOCAL_BRIDGE_FETCH_FAILED" : "")
+          || (pendingComposerAttachments > 0 ? "COMPOSER_ATTACHMENTS_PENDING" : ""));
         const failureDetail = error.message || "upload failed";
         reportWorkbenchProgress(task, "失败", 100, failureDetail, "failed");
         reportWorkbenchTask(task, "failed", failureDetail, {
@@ -2765,6 +2780,7 @@
           "MIXED_POST_ATTACHMENTS",
           "COMPOSER_ATTACHMENT_CONFLICT",
           "COMPOSER_DRAFT_NOT_SET",
+          "ATTACHMENT_UPLOAD_NOT_READY",
           "WINDOW_STAGE_PENDING",
           "WEB_RESPONSE_IN_FLIGHT",
           "IMAGE_COUNT_UNCERTAIN",
@@ -3284,7 +3300,7 @@
     const retryFromStage = String(message.retryFromStage || "").trim();
     const forceUpload = Boolean(message.forceUpload);
     const taskOptions = message.autoOptions && typeof message.autoOptions === "object" ? message.autoOptions : {};
-    const noPromptMode = taskOptions.mode === "random";
+    const noPromptMode = taskOptions.useCurrentSession !== false || taskOptions.mode === "random";
     localStorage.setItem("tb-workbench-prompt-library-enabled", taskOptions.promptLibraryEnabled === false ? "0" : "1");
     localStorage.setItem("tb-workbench-message-downloads-enabled", taskOptions.messageDownloadsEnabled === false ? "0" : "1");
     window.dispatchEvent(new CustomEvent("tb-workbench-tools-visibility"));
@@ -3306,6 +3322,7 @@
         type: "tb-workbench-task-result",
         requestId,
         status: "failed",
+        errorCode: "COMPOSER_ATTACHMENT_CONFLICT",
         detail: "当前 GPT 输入框需要先清理未发送内容；已暂停当前窗口，请先重试上一帖"
       }, "*");
       return;
@@ -3316,6 +3333,13 @@
       : null;
     if (retryTask) {
       retryTask.entry.externalRequestId = requestId;
+      retryTask.entry.name = String(message.name || retryTask.entry.name || "工作台素材").slice(0, 160);
+      retryTask.entry.path = String(message.materialPath || message.name || retryTask.entry.path || "工作台素材");
+      retryTask.entry.materialPath = String(message.materialPath || retryTask.entry.materialPath || "");
+      retryTask.entry.attachments = attachments;
+      retryTask.entry.customPrompt = prompt;
+      retryTask.entry.expectedImages = Math.max(0, Number(message.expectedImages || retryTask.entry.expectedImages || 0));
+      retryTask.entry.accountId = String(message.quotaAccountId || message.accountId || retryTask.entry.accountId || "");
       retryTask.entry.autoOptions = taskOptions;
       retryTask.entry.retryFromStage = String(message.retryFromStage || "");
       retryTask.entry.retryFromPercent = Number(message.retryFromPercent || 0);
