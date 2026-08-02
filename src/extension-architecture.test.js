@@ -18,6 +18,7 @@ test("自动生产核心能够解析计划页数并去重 A/B 图片", () => {
     "预计输出总张数：4张"
   ].join("\n");
   assert.equal(core.parsePlannedImageCount(plan), 4);
+  assert.equal(core.parsePlannedImageCount("预计输出总张数\n固定7张独立3:4图片"), 7);
   assert.deepEqual(core.uniqueGeneratedImageUrls([
     "https://example.com/a.png",
     "https://example.com/a.png",
@@ -40,7 +41,7 @@ test("扩展把最新版网页助手与右侧生产舱拆成两个独立模块",
   assert.ok(manifest.host_permissions.includes("https://raw.githubusercontent.com/*"));
   assert.ok(manifest.permissions.includes("downloads"));
   assert.equal(manifest.name, "团建 GPT 数字作品生产助手");
-  assert.equal(manifest.version, "0.2.21");
+  assert.equal(manifest.version, "0.2.24");
 });
 
 test("GPT web controls stay visible and place prompt panel inside viewport", () => {
@@ -76,6 +77,17 @@ test("embedded automation can toggle prompt and download tools and rejects incom
   assert.match(source, /productRoot/);
   assert.match(vendor, /promptLibraryEnabled/);
   assert.match(vendor, /messageDownloadToolsEnabled/);
+});
+
+test("generated image download accepts verified octet-stream payloads", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const embedded = fs.readFileSync(path.join(root, "..", "..", "teambuilding-workflow-dashboard", "src", "integrations", "gpt-production-extension", "sidebar.js"), "utf8");
+  for (const script of [source, embedded]) {
+    assert.match(script, /function sniffImageContentType\(bytes\)/);
+    assert.match(script, /application\/octet-stream/);
+    assert.match(script, /new Uint8Array\(buffer\)/);
+    assert.match(script, /bufferToBase64\(buffer\)/);
+  }
 });
 
 test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务", () => {
@@ -119,7 +131,8 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /图片后台下载/);
   assert.match(source, /剪贴板不可用，继续直接写入 TXT/);
   assert.match(source, /"等待迁移计划"/);
-  assert.match(source, /stop\.\{0,12\}.*generating.*streaming.*response.*thinking/);
+  assert.match(source, /stop-\(\?:button\|generating\|streaming\|response\)/);
+  assert.match(source, /composer\|voice\|microphone\|dictation/);
   assert.match(source, /data-message-author-role="assistant"\]\[data-is-streaming="true"\]/);
   assert.match(source, /dismissImageComparison\(\);[\s\S]*generatedImageUrls/);
   assert.match(source, /generatedImageCompletionEvidence/);
@@ -137,6 +150,11 @@ test("内置工作台模式复用原生 GPT 并接收左侧素材与模板任务
   assert.match(source, /packageResult\.duplicate/);
   assert.match(source, /duplicateSkipped:\s*true/);
   assert.match(source, /已删除本轮/);
+  assert.match(source, /function currentAutomationBoundarySnapshot\(\)/);
+  assert.match(source, /WINDOW_STAGE_PENDING/);
+  assert.match(source, /COPY_REQUIRED/);
+  assert.match(source, /请先复制或下载本轮文案 TXT/);
+  assert.match(source, /文案是打包前置条件/);
 });
 
 test("generated image detection does not stop during the pause after the first image", () => {
@@ -159,6 +177,29 @@ test("generated image detection does not stop during the pause after the first i
   assert.match(source, /freshImageUrls\(\[turns\[index\]\]\)\.length === taskExpectedImages/);
   assert.doesNotMatch(source, /等待图片\|生成图片\|下载图片\|download\/i\.test\(String\(task\.entry\.retryFromStage \|\| ""\)\) && !workflow\.planDone/);
   assert.match(source, /outerTurns[\s\S]*!turn\.querySelector\('\[data-message-author-role="user"\]'\)[\s\S]*article\[data-turn="assistant"\]/);
+});
+
+test("automatic packaging waits for validated copy text before final image download", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const copyGate = source.indexOf("if (!isLikelyPublishCopy(copyText, 300))");
+  const finalDownload = source.indexOf("const downloadPromise = workflow.downloadResult");
+  assert.ok(copyGate > -1 && finalDownload > copyGate);
+  assert.match(source.slice(copyGate, finalDownload), /api\("\/api\/extension\/save-copy-text"/);
+  assert.match(source.slice(copyGate, finalDownload), /await saveCheckpoint\("文案 TXT 已保存", 78\)/);
+  assert.match(source, /task\.workflow\?\.batchId \|\| \(task\.workflow\.batchId = workPackageBatchId\(\)\)/);
+  assert.match(source, /文案完成前不下载、不打包/);
+});
+
+test("generated output detects script artifacts and retry signals before packaging", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.match(source, /function generatedOutputRisk\(scope\)/);
+  assert.match(source, /script-output-only/);
+  assert.match(source, /GENERATION_LIMIT_SIGNAL/);
+  assert.match(source, /code\\s\*interpreter/);
+  assert.match(source, /download\\s\+all/);
+  assert.match(source, /const scriptOutput = hasCodeSignal \|\| hasScriptArtifact/);
+  assert.match(source, /risk\.scriptOutput \? "script-output"/);
+  assert.match(source, /completion\?\.hardFailure/);
 });
 
 test("generated image detection includes folded ChatGPT sandbox image artifacts", () => {
@@ -197,6 +238,8 @@ test("右侧生产舱同时声明成品、素材、路径设置和附件上传�
   assert.match(source, /input\.files\.length !== files\.length/);
   assert.match(source, /uploadTasks/);
   assert.match(source, /processUploadQueue/);
+  assert.match(source, /reportWorkbenchProgress\(task, "失败", 100, failureDetail, "failed"\)/);
+  assert.match(source, /reportWorkbenchProgress\(task, "已取消", 100, `已取消：\$\{entry\.name\}`, "cancelled"\)/);
   assert.match(source, /data-cancel-upload/);
   assert.match(source, /data-retry-upload/);
   assert.match(source, /DROP_OVERLAY_ID/);
@@ -351,6 +394,16 @@ test("manual production can invoke visible download, package and text actions", 
   assert.match(vendor, /tb-workbench-manual-action-result/);
 });
 
+test("manual package saves copy text before downloading the reply image group", () => {
+  const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
+  const saveText = vendor.indexOf("TeambuildingGptProductionSaveCopyText");
+  const imageDownload = vendor.indexOf("runImageDownloadShortcut(imageButton)");
+  assert.ok(saveText > -1 && imageDownload > saveText);
+  assert.match(vendor, /const clipboardText = await navigator\.clipboard\.readText\(\)\.catch/);
+  assert.match(vendor, /const replyText = textContentForDownload\(textCardForCopyButton\(copyButton\)\)/);
+  assert.match(vendor.slice(saveText, imageDownload), /await saveCopyText\(\{ copyText, batchId \}\)/);
+});
+
 test("manual and automatic downloads persist a reply-bound used marker", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const vendor = fs.readFileSync(path.join(root, "vendor", "chatgpt-conversation-tree.user.js"), "utf8");
@@ -420,6 +473,9 @@ test("one material task cannot stack another post into the current GPT composer"
   assert.match(source, /productionBoundaryError\("COMPOSER_DRAFT_PENDING"/);
   assert.match(source, /productionBoundaryError\("MIXED_POST_ATTACHMENTS"/);
   assert.match(source, /productionBoundaryError\("COMPOSER_ATTACHMENTS_PENDING"/);
+  assert.match(source, /function latestAutomationMaterialPrompt\(/);
+  assert.match(source, /productionBoundaryError\("WINDOW_STAGE_PENDING"/);
+  assert.match(source, /automationPromptMatchesEntry\(/);
   assert.match(source, /const errorCode = String\(error\?\.code/);
   assert.match(source, /const pendingComposerAttachments = attachmentPreviewCount\(\)/);
 });
@@ -432,12 +488,45 @@ test("a fresh material waits until the previous GPT response is truly idle", () 
   assert.match(source, /等待上一帖完成/);
 });
 
+test("fresh upload idle guard ignores historical toolbar text", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const embedded = fs.readFileSync(path.join(root, "..", "..", "teambuilding-workflow-dashboard", "src", "integrations", "gpt-production-extension", "sidebar.js"), "utf8");
+  for (const text of [source, embedded]) {
+    const start = text.indexOf("function generatingNow()");
+    const end = text.indexOf("async function waitForPageIdleBeforeFreshUpload", start);
+    const detector = text.slice(start, end);
+    assert.match(detector, /Only trust a visible, explicit stop\/stream control/);
+    assert.match(detector, /composer\|voice\|microphone\|dictation/);
+    assert.match(detector, /stop-\(\?:button\|generating\|streaming\|response\)/);
+    assert.doesNotMatch(detector, /button\.textContent \|\| ""/);
+  }
+});
+
+test("automatic workflow clears residual composer drafts before each control turn", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const embedded = fs.readFileSync(path.join(root, "..", "..", "teambuilding-workflow-dashboard", "src", "integrations", "gpt-production-extension", "sidebar.js"), "utf8");
+  for (const text of [source, embedded]) {
+    assert.match(text, /function setComposerText\(text\)/);
+    assert.match(text, /function clearComposerDraft\(\)/);
+    assert.match(text, /replaceComposerText\(String\(options\.confirmText/);
+    assert.match(text, /replaceComposerText\(String\(options\.copyPrompt/);
+    assert.match(text, /workflow\.planSubmitted = true;\s*await submitComposer\(\);\s*clearComposerDraft\(\);/);
+    assert.match(text, /function replaceComposerText\(text(?:, owner = null)?\)/);
+    assert.match(text, /replaceComposerText\(instruction\(entry\)(?:, entry)?\)/);
+    assert.match(text, /COMPOSER_DRAFT_NOT_SET/);
+    assert.match(text, /looksLikeAutomationDraft\(/);
+    assert.match(text, /currentBatchChoicePrompt\(/);
+    assert.match(text, /确认首批出图/);
+  }
+});
+
 test("automatic production derives no-prompt mode inside the workflow scope", () => {
   const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
   const start = source.indexOf("async function runAutomaticProduction");
   const end = source.indexOf("function findEntry", start);
   const workflow = source.slice(start, end);
-  assert.match(workflow, /const noPromptMode = options\.mode === "random"/);
+  assert.match(workflow, /const noPromptMode = \(options\.useCurrentSession !== false/);
+  assert.match(workflow, /conversationStateSnapshot\(\)/);
   assert.match(workflow, /if \(noPromptMode && !workflow\.planDone\)/);
 });
 
@@ -447,4 +536,23 @@ test("online share templates are continued into an editable conversation before 
   assert.match(source, /Continue \(\?:this \)\?conversation/);
   assert.match(source, /在线模板当前不可编辑/);
   assert.match(source, /await ensureEditableConversation\(\)/);
+});
+
+test("normal GPT conversation waits for its composer instead of being mislabeled as an online template", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  assert.ok(source.includes('!composer() && !/^\\/share\\//i.test(location.pathname)'));
+  assert.ok(source.includes('await waitFor(() => Boolean(composer()), 20_000)'));
+  assert.ok(source.includes('Waiting for GPT composer'));
+});
+
+test("composer boundary failure pauses the extension queue before the next post", () => {
+  const source = fs.readFileSync(path.join(root, "sidebar.js"), "utf8");
+  const embedded = fs.readFileSync(path.join(root, "..", "..", "teambuilding-workflow-dashboard", "src", "integrations", "gpt-production-extension", "sidebar.js"), "utf8");
+  for (const text of [source, embedded]) {
+    assert.match(text, /boundaryPaused:\s*false/);
+    assert.match(text, /state\.boundaryPaused\s*=\s*true/);
+    assert.match(text, /if \(!state\.boundaryPaused\) processUploadQueue\(\)/);
+    assert.match(text, /state\.boundaryPaused && !retryOf/);
+    assert.match(text, /if \(retryOf\) state\.boundaryPaused = false/);
+  }
 });

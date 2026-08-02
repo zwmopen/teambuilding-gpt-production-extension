@@ -5,7 +5,10 @@
 })(typeof globalThis !== "undefined" ? globalThis : this, () => {
   function parsePlannedImageCount(text) {
     const source = String(text || "");
-    const explicit = [...source.matchAll(/(?:预计输出(?:总)?(?:张数|页数)|输出总张数|共计|合计)\s*[：:]?\s*(\d{1,2})\s*(?:张|页)/gi)]
+    // GPT often formats the value on the next line, e.g.
+    // “预计输出总张数\n固定7张独立3:4图片”. Keep the label/value pair bounded so
+    // unrelated counts in the plan are not mistaken for the page total.
+    const explicit = [...source.matchAll(/(?:预计输出(?:总)?(?:张数|页数)|输出总张数|共计|合计|固定)\s*(?:[：:]?\s*)[^\d]{0,80}?(\d{1,2})\s*(?:张|页)/gi)]
       .map((match) => Number(match[1]))
       .filter((value) => value > 0 && value <= 30);
     if (explicit.length) return explicit[explicit.length - 1];

@@ -6257,11 +6257,25 @@
     event?.stopPropagation?.();
     event?.stopImmediatePropagation?.();
     setWorkPackageButtonState(button, 'running');
-    showImageDownloadToast('正在下载并核对本组图片...', true);
+    showImageDownloadToast('正在保存文案，随后下载并核对本组图片...', true);
     try {
       const imageButton = button.__cgptImageDownloadButton;
       if (!imageButton) throw new Error('没有找到当前回复对应的图片下载按钮');
+      const turn = imageButton.closest?.('[data-testid^="conversation-turn"], [data-message-author-role="assistant"]');
+      const copyButton = turn?.querySelector?.('button[data-testid="copy-turn-action-button"], button[aria-label*="复制回复"], button[aria-label*="Copy response" i]');
+      const replyText = textContentForDownload(textCardForCopyButton(copyButton));
+      const clipboardText = await navigator.clipboard.readText().catch(() => '');
+      const copyText = String(clipboardText || '').trim() || String(replyText || '').trim();
+      if (!copyText) throw new Error('请先复制或下载本轮文案 TXT，再执行下载并打包');
       const priorDownload = imageDownloadRecordForButton(imageButton);
+      const batchId = imageButton.dataset.cgptWorkPackageBatch
+        || priorDownload?.batchId
+        || `${new Date().toISOString().replace(/\D/g, '').slice(0, 8)}-${new Date().toTimeString().replace(/\D/g, '').slice(0, 6)}-${Math.random().toString(36).slice(2, 6)}`;
+      imageButton.dataset.cgptWorkPackageBatch = batchId;
+      const saveCopyText = globalThis.TeambuildingGptProductionSaveCopyText;
+      if (typeof saveCopyText !== 'function') throw new Error('工作台文案保存桥接尚未就绪，请稍后再试');
+      await saveCopyText({ copyText, batchId });
+      showImageDownloadToast('文案 TXT 已保存，开始下载本组图片...', true);
       const currentTotal = Number(imageButton.dataset.cgptImageTotal || 0)
         || uniqueImageUrls(imageButton.__cgptImageDownloadImages || []).length;
       const canReuseDownload = Boolean(
@@ -6281,13 +6295,12 @@
       if (!downloadResult?.batchId || downloadResult.downloaded !== downloadResult.total) {
         throw new Error(`本组图片未完整下载：${downloadResult?.downloaded || 0}/${downloadResult?.total || 0}`);
       }
-      const clipboardText = await navigator.clipboard.readText();
       const packageRequest = {
-        clipboardText,
+        clipboardText: copyText,
         title: currentWorkPackageConversationTitle(),
         conversationUrl: currentWorkPackageConversationUrl(),
         accountName: currentWorkPackageAccountName(),
-        batchId: downloadResult.batchId,
+        batchId: downloadResult.batchId || batchId,
         expectedImageCount: downloadResult.total,
       };
       const response = typeof globalThis.TeambuildingGptProductionPackage === 'function'
